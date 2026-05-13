@@ -1,5 +1,5 @@
 # Rex Tendon
-![Rex Tendon Cover](rex_assets/rex_media/rex_tendon_cover.png)
+![Rex Tendon Hardware](rex_assets/rex_media/rex_hardware_moded.png)
 
 Rex Tendon is a soft-bodied tentacle robot using the [SpiRobs](https://arxiv.org/pdf/2303.09861) design, controlled through a mix of reinforcement learning and GPT-4o. Read the full blogpost [here](https://www.matthieulc.com/posts/rex-tendon/).
 
@@ -95,6 +95,7 @@ python -m rex_tendon idle --duration 10 \
 ```
 
 ### 3. RL Pipeline
+![Simulation View](rex_assets/rex_media/rex_sim_realistic.png)
 
 Generate MuJoCo XML model:
 ```bash

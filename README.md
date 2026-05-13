@@ -137,15 +137,7 @@ python -m rex_tendon extract-frames video.mp4 output_frames/ 100
 
 I used [roboflow](https://roboflow.com/) to annotate these images, it has a great auto-label feature to avoid wasting time on high confidence images.
 
-Generate synthetic training data (I extracted the tentacle tip using the [Segment Anything demo](https://segment-anything.com/demo)):
-```bash
-# Basic usage with defaults
-python -m rex_tendon synthetic-images rex_assets/rex_synthetic/objects rex_assets/rex_synthetic/backgrounds --num-images 1000
 
-Train vision model on synthetic images:
-```bash
-python -m rex_tendon vision train dataset.yaml --config rex_tendon/configs/default_vision_training.yaml
-```
 
 Then change `base_model` in the vision training config to point to the best model checkpoint and continue training on real images.
 

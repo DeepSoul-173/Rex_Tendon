@@ -1,5 +1,5 @@
 # Rex Tendon
-![System demonstration](rex_assets/rex_media/system.gif)
+![Rex Tendon Cover](rex_assets/rex_media/rex_tendon_cover.png)
 
 Rex Tendon is a soft-bodied tentacle robot using the [SpiRobs](https://arxiv.org/pdf/2303.09861) design, controlled through a mix of reinforcement learning and GPT-4o. Read the full blogpost [here](https://www.matthieulc.com/posts/rex-tendon/).
 

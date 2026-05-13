@@ -1,0 +1,23 @@
+.env
+.DS_Store
+__pycache__/
+rex_results/
+results/
+.venv/
+.pytest_cache/
+**/data/**
+**/projects/**
+/media/
+MUJOCO_LOG.TXT
+projects/**
+*.zip
+*.pkl
+
+# Testing and Scratch scripts
+scratch_*.py
+test_*.py
+tests/
+visualize_model.py
+train_pick_place.py
+implementation_plan.md
+yolov8n.pt

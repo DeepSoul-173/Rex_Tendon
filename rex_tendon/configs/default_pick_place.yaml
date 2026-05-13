@@ -1,0 +1,114 @@
+pick_place:
+  env:
+    # MuJoCo simulation settings
+    xml_file: "rex_assets/rex_simulation/pick_and_place_scene.xml"
+    simulation_length_seconds: 12.0
+    time_between_steps_seconds: 0.08
+
+    # Actuator/tendon settings
+    initial_actuator_position: [0.20, 0.26]
+
+    # Environment objects
+    tip_site_name: "tip_center"
+    place_zone_site_name: "place_zone"
+
+    # Object configuration
+    object_names: ["obj_cube", "obj_cylinder", "obj_sphere", "obj_capsule", "obj_box2"]
+    object_site_names: ["obj_cube_site", "obj_cylinder_site", "obj_sphere_site", "obj_capsule_site", "obj_box2_site"]
+    object_geom_names: ["obj_cube_geom", "obj_cylinder_geom", "obj_sphere_geom", "obj_capsule_geom", "obj_box2_geom"]
+    grasp_constraint_names: ["grasp_cube", "grasp_cylinder", "grasp_sphere", "grasp_capsule", "grasp_box2"]
+
+    # Grasping parameters
+    grasp_distance_threshold: 0.06
+    grasp_consecutive_steps: 3
+    place_distance_threshold: 0.06
+
+    # Reward shaping
+    reach_reward_scale: 1.0
+    grasp_bonus: 5.0
+    transport_reward_scale: 2.0
+    place_bonus: 10.0
+    drop_penalty: 3.0
+    action_change_penalty_scale: 0.1
+    action_jerk_penalty_scale: 0.02
+    object_progress_reward_scale: 4.0
+    stable_contact_bonus_scale: 0.1
+    assisted_grasp_enabled: false
+    assisted_grasp_follow_alpha: 1.0
+
+    # Curriculum learning
+    curriculum_enabled: true
+    reach_only_steps: 500000
+    reach_grasp_steps: 2000000
+
+    # Observation settings
+    num_frames: 4
+    include_actuator_lengths_in_obs: true
+    include_relative_observations: true
+    include_object_velocity_in_obs: true
+
+    # Object spawn bounds (on desk surface)
+    object_spawn_bounds_min: [-0.1, -0.1, -0.025]
+    object_spawn_bounds_max: [0.1, 0.1, -0.025]
+
+    # Action space
+    max_2d_action_magnitude: 1.0
+    action_smoothing_alpha: 0.45
+    max_action_delta_per_step: 0.25
+
+    # Domain randomization
+    randomize_dynamics: true
+    randomization_factors:
+      body_mass: 0.05
+      body_inertia: 0.05
+      dof_damping: 0.05
+      jnt_stiffness: 0.05
+      geom_friction: 0.05
+
+    # Observation noise
+    add_observation_noise: true
+    observation_noise_scale: 0.005
+
+  training:
+    # Environment setup
+    num_envs: 12
+
+    # Training duration
+    total_timesteps: 10000000
+
+    # Evaluation
+    eval_freq: 20000
+    n_eval_episodes: 5
+
+    # Checkpointing
+    save_freq: 50000
+    log_dir_base: "rex_results/pick_place"
+
+    # PPO hyperparameters
+    learning_rate: 0.0003
+    n_steps: 1024
+    batch_size: 256
+    n_epochs: 10
+    gamma: 0.99
+    gae_lambda: 0.95
+    clip_range: 0.2
+    ent_coef: 0.01
+
+    # Network architecture
+    net_arch: "256-256"
+    activation_fn: "Tanh"
+
+  evaluation:
+    num_episodes: 10
+    render_delay: 0.05
+    deterministic_actions: true
+    render_mode: null
+
+  active_task: task1
+  tasks:
+    task1:
+      name: task1
+      active_object_index: 0
+      object_position: [0.08, -0.05, 0.0]
+      place_position: [-0.08, 0.08, -0.025]
+      randomize_object_position: true

@@ -1,0 +1,48 @@
+control:
+
+  # RL Configuration
+  model_path: "rex_assets/rex_models/rl/target_following_baseline.zip"
+  num_frames: 4
+  deterministic: true
+  actuator_low: 0.12
+  actuator_high: 0.34
+  max_2d_action_magnitude: 1.0 # Maximum magnitude for 2D cursor actions
+  include_actuator_lengths_in_obs: true # Whether to include actuator lengths in the observation
+  clip_observations: true # Master switch for observation clipping
+  obs_clip_bounds:
+    tip_min: [-0.5, -0.3, 0.00] # Z, X, Y (from policy_training target_bounds)
+    tip_max: [-0.0, 0.3, 0.3] # Z, X, Y (from policy_training target_bounds)
+    target_min: [-0.2, -0.05, 0.12] # Z, X, Y (from policy_training target_bounds)
+    target_max: [-0.1, 0.07, 0.22] # Z, X, Y (from policy_training target_bounds)
+    actuator_length_min: 0.12
+    actuator_length_max: 0.28
+  safety_offset_min: -4000
+  safety_offset_max: 3000
+
+  # Calibration Configuration - Direct 2D Position
+  calibration_2d_position: [0.13, -0.075]  # [x, y] in control plane, range [-1, 1]
+
+  # Orchestrator Configuration
+  lost_frames_threshold: 15 # consecutive missing frames before recovery 
+  stop_on_prolonged_loss: true # stop controller entirely instead of returning to home when finger lost for too long
+
+  # Action Smoothing Configuration
+  action_smoothing_alpha: 0.4 # Action smoothing factor (0.0=max smoothing, 1.0=no smoothing)
+
+  # Action Calibration Configuration
+  action_2d_offset: [-0.035, 0.02] # Constant 2D offset [x, y] added to RL action output for calibration, here equal to 0.4x the motor 2 principle axis
+
+  # Idle Motion Configuration
+  idle_motion_pattern_config:
+    base_period: 1.0
+    base_period_range: [1.0, 5.0]
+    amplitude: 0.05
+    amplitude_range: [0.05, 0.3]
+    direction_jitter_interval: 5.0
+    direction_jitter_interval_range: [5.0, 20.0]
+    direction_change_duration: 10.0
+    origin_avoidance_radius: 0.07
+    frequency_transition_duration: 10.0
+    jitter_frequency_transition_duration: 10
+    jitter: 0.0
+  idle_motion_max_motor_step_per_loop: 30

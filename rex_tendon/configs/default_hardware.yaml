@@ -1,0 +1,28 @@
+hardware:
+  # Motor configuration
+  motor_config:
+    "1": [1, "sts3215"]
+    "2": [2, "sts3215"] 
+    "3": [3, "sts3215"]
+  baudrate: 1000000
+
+  # Serial port configuration
+  port: "/dev/tty.usbmodem58FA0823471"
+
+  # Calibration
+  calibration_file: "rex_assets/rex_hardware/calibration/tentacle_calibration.json"
+
+  # Motor physics parameters 
+  ticks_per_rotation: 4096
+  length_per_rotation: 0.11  # metres per full spool rotation
+  baseline_length: 0.23      # relaxed cable length [m]
+  tick_sign: -1               # +1: increasing ticks lengthen cable, -1: increasing ticks shorten
+
+  # Control parameters
+  motor_settle_time: 0.01  # Time to wait for motors to reach position (seconds)
+  position_tolerance: 100  # Acceptable position error in ticks
+  
+  # Component timing parameters (Hz = updates per second)
+  control_loop_hz: 200.0      # Main motor control loop frequency
+  trackpad_control_hz: 200.0  # Trackpad control update rate  
+  idle_motion_hz: 200.0       # Idle motion pattern update rate 

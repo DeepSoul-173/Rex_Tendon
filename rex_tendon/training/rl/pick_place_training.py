@@ -1,0 +1,477 @@
+"""Pick-and-place RL training with PPO and curriculum learning."""
+
+import logging
+import multiprocessing as mp
+from pathlib import Path
+from datetime import datetime
+from typing import Optional
+import shutil
+
+import yaml
+import typer
+import numpy as np
+import torch
+import torch.nn as nn
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.callbacks import (
+    CheckpointCallback,
+    EvalCallback,
+    BaseCallback,
+)
+from stable_baselines3.common.monitor import Monitor
+from rich.console import Console
+
+from .pick_place_env import TentaclePickPlaceEnv
+from ...configs.pick_place_config import PickPlaceConfig, PickPlaceEnvConfig
+
+logger = logging.getLogger(__name__)
+console = Console()
+app = typer.Typer(help="Pick-and-place RL training utilities")
+
+
+class PickPlaceMetricsCallback(BaseCallback):
+    """Custom callback to log pick-and-place specific metrics."""
+
+    def __init__(self, verbose: int = 0):
+        super().__init__(verbose)
+        self.grasp_successes = 0
+        self.place_successes = 0
+        self.drop_count = 0
+        self.episode_count = 0
+        self.action_changes = []
+        self.action_jerks = []
+        self.object_distances = []
+
+    def _on_step(self) -> bool:
+        for info in self.locals.get("infos", []):
+            if "action_change" in info:
+                self.action_changes.append(info["action_change"])
+            if "action_jerk" in info:
+                self.action_jerks.append(info["action_jerk"])
+            if "object_to_place_distance" in info:
+                self.object_distances.append(info["object_to_place_distance"])
+
+        # Check for completed episodes
+        for info in self.locals.get("infos", []):
+            if "episode" in info:
+                self.episode_count += 1
+                if info.get("place_success", False):
+                    self.place_successes += 1
+                if info.get("is_grasped", False) or info.get("place_success", False):
+                    self.grasp_successes += 1
+                if info.get("was_dropped", False):
+                    self.drop_count += 1
+
+        # Log metrics every 1000 steps
+        if self.num_timesteps % 1000 == 0 and self.episode_count > 0:
+            grasp_rate = self.grasp_successes / max(1, self.episode_count) * 100
+            place_rate = self.place_successes / max(1, self.episode_count) * 100
+            drop_rate = self.drop_count / max(1, self.episode_count) * 100
+
+            self.logger.record("pick_place/grasp_success_rate", grasp_rate)
+            self.logger.record("pick_place/place_success_rate", place_rate)
+            self.logger.record("pick_place/drop_rate", drop_rate)
+            self.logger.record("pick_place/total_episodes", self.episode_count)
+            if self.action_changes:
+                self.logger.record(
+                    "pick_place/mean_action_change",
+                    float(np.mean(self.action_changes[-1000:])),
+                )
+            if self.action_jerks:
+                self.logger.record(
+                    "pick_place/mean_action_jerk",
+                    float(np.mean(self.action_jerks[-1000:])),
+                )
+            if self.object_distances:
+                self.logger.record(
+                    "pick_place/mean_object_to_place_distance",
+                    float(np.mean(self.object_distances[-1000:])),
+                )
+
+            # Get curriculum phase from first info
+            for info in self.locals.get("infos", []):
+                if "curriculum_phase" in info:
+                    phase_names = {0: "REACH", 1: "REACH_GRASP", 2: "FULL"}
+                    phase = info["curriculum_phase"]
+                    self.logger.record("pick_place/curriculum_phase", phase)
+                    break
+
+        return True
+
+
+class SaveVecNormalizeCallback(BaseCallback):
+    """Persist VecNormalize statistics during and after training."""
+
+    def __init__(self, save_path: Path, save_freq: int, verbose: int = 0):
+        super().__init__(verbose)
+        self.save_path = Path(save_path)
+        self.save_freq = max(1, save_freq)
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps % self.save_freq == 0:
+            self._save_stats("vecnormalize.pkl")
+        return True
+
+    def _on_training_end(self) -> None:
+        self._save_stats("vecnormalize_final.pkl")
+
+    def _save_stats(self, filename: str) -> None:
+        env = self.model.get_vec_normalize_env()
+        if env is not None:
+            env.save(str(self.save_path / filename))
+
+
+def load_pick_place_config(config_path: Optional[str] = None) -> PickPlaceConfig:
+    """Load pick-and-place configuration from YAML file."""
+    if config_path is None:
+        return PickPlaceConfig()
+
+    with open(config_path, "r") as f:
+        raw = yaml.safe_load(f)
+
+    pick_place_data = raw.get("pick_place", raw)
+    return PickPlaceConfig(**pick_place_data)
+
+
+def save_run_config(
+    config: PickPlaceConfig, results_dir: Path, source_path: Optional[str]
+) -> None:
+    """Save the resolved run config and original YAML when available."""
+    with open(results_dir / "resolved_config.yaml", "w", encoding="utf-8") as fh:
+        yaml.safe_dump(config.model_dump(mode="json"), fh, sort_keys=False)
+
+    if source_path:
+        source = Path(source_path)
+        if source.exists():
+            shutil.copy2(source, results_dir / "source_config.yaml")
+
+
+def get_active_task(config: PickPlaceConfig):
+    if config.active_task is None:
+        return None
+    return config.tasks.get(config.active_task)
+
+
+def setup_directories(config: PickPlaceConfig) -> tuple:
+    """Setup training directories."""
+    date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"pick_place_{date_str}"
+
+    results_dir = Path(config.training.log_dir_base) / run_name
+    log_dir = results_dir / "logs"
+    model_dir = results_dir / "models"
+
+    log_dir.mkdir(parents=True, exist_ok=True)
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    return results_dir, log_dir, model_dir
+
+
+def create_policy_kwargs(config: PickPlaceConfig) -> dict:
+    """Create policy kwargs from configuration."""
+    net_arch = [int(x) for x in config.training.net_arch.split("-")]
+    activation_fn = getattr(nn, config.training.activation_fn, nn.Tanh)
+
+    return {
+        "net_arch": {"pi": net_arch, "vf": net_arch},
+        "activation_fn": activation_fn,
+    }
+
+
+def create_environment(
+    config: PickPlaceConfig,
+    n_envs: int,
+    eval_env: bool = False,
+    global_step_counter: Optional[list] = None,
+):
+    """Create training or evaluation environment."""
+    task_config = get_active_task(config)
+    env_kwargs = {
+        "config": config.env,
+        "render_mode": None if not eval_env else config.evaluation.render_mode,
+        "global_step_counter": global_step_counter,
+        "task_config": task_config,
+    }
+
+    if n_envs == 1 or eval_env:
+        return DummyVecEnv([lambda: Monitor(TentaclePickPlaceEnv(**env_kwargs))])
+    else:
+        return make_vec_env(
+            TentaclePickPlaceEnv,
+            n_envs=n_envs,
+            vec_env_cls=SubprocVecEnv if n_envs > 1 else DummyVecEnv,
+            env_kwargs=env_kwargs,
+        )
+
+
+@app.command()
+def train(
+    config: Optional[str] = typer.Option(
+        None, "--config", help="Path to YAML configuration file"
+    ),
+    total_timesteps: Optional[int] = typer.Option(None, help="Override total timesteps"),
+    num_envs: Optional[int] = typer.Option(None, help="Override number of environments"),
+    learning_rate: Optional[float] = typer.Option(None, help="Override learning rate"),
+    verbose: bool = typer.Option(True, help="Enable verbose output"),
+) -> None:
+    """Train pick-and-place RL model."""
+    # Load configuration
+    pp_config = load_pick_place_config(config)
+
+    # Apply CLI overrides
+    if total_timesteps is not None:
+        pp_config.training.total_timesteps = total_timesteps
+    if num_envs is not None:
+        pp_config.training.num_envs = num_envs
+    if learning_rate is not None:
+        pp_config.training.learning_rate = learning_rate
+
+    # Setup directories
+    results_dir, log_dir, model_dir = setup_directories(pp_config)
+    save_run_config(pp_config, results_dir, config)
+
+    # Use a Manager to share the counter cleanly across processes on Windows
+    manager = mp.Manager()
+    global_step_counter = manager.Value('i', 0)
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Create test env to get info
+    test_env = TentaclePickPlaceEnv(
+        config=pp_config.env,
+        global_step_counter=global_step_counter,
+        task_config=get_active_task(pp_config),
+    )
+    steps_per_episode = test_env._max_episode_steps
+    time_per_step = test_env.time_per_step
+    test_env.close()
+
+    if verbose:
+        console.print("[bold green]Pick-and-Place RL Training[/bold green]")
+        console.print(f"  Device: [bold cyan]{device.upper()}[/bold cyan]")
+        console.print(f"  Total timesteps: {pp_config.training.total_timesteps:,}")
+        console.print(f"  Steps/episode: {steps_per_episode}")
+        console.print(f"  Time/step: {time_per_step:.3f}s")
+        console.print(f"  Learning rate: {pp_config.training.learning_rate}")
+        console.print(f"  Num envs: {pp_config.training.num_envs}")
+        console.print(f"  Curriculum: {pp_config.env.curriculum_enabled}")
+        if pp_config.env.curriculum_enabled:
+            console.print(f"    Reach-only: 0 - {pp_config.env.reach_only_steps:,}")
+            console.print(f"    Reach+Grasp: {pp_config.env.reach_only_steps:,} - {pp_config.env.reach_grasp_steps:,}")
+            console.print(f"    Full: {pp_config.env.reach_grasp_steps:,}+")
+        console.print(f"  Results: {results_dir}")
+
+    # Create environments
+    train_env = create_environment(
+        pp_config, pp_config.training.num_envs,
+        global_step_counter=global_step_counter,
+    )
+    eval_env = create_environment(
+        pp_config, 1, eval_env=True,
+        global_step_counter=global_step_counter,
+    )
+    train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+    eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
+    eval_env.training = False
+
+    # Create model
+    policy_kwargs = create_policy_kwargs(pp_config)
+    model = PPO(
+        "MlpPolicy",
+        train_env,
+        learning_rate=pp_config.training.learning_rate,
+        n_steps=pp_config.training.n_steps,
+        batch_size=pp_config.training.batch_size,
+        n_epochs=pp_config.training.n_epochs,
+        gamma=pp_config.training.gamma,
+        gae_lambda=pp_config.training.gae_lambda,
+        clip_range=pp_config.training.clip_range,
+        ent_coef=pp_config.training.ent_coef,
+        policy_kwargs=policy_kwargs,
+        verbose=1 if verbose else 0,
+        tensorboard_log=str(log_dir),
+        device=device,
+    )
+
+    # Callbacks
+    save_freq = max(1, pp_config.training.save_freq // pp_config.training.num_envs)
+    eval_freq = max(1, pp_config.training.eval_freq // pp_config.training.num_envs)
+
+    callbacks = [
+        CheckpointCallback(
+            save_freq=save_freq,
+            save_path=str(model_dir),
+            name_prefix="pick_place_model",
+        ),
+        EvalCallback(
+            eval_env,
+            best_model_save_path=str(model_dir / "best_model"),
+            log_path=str(log_dir),
+            eval_freq=eval_freq,
+            n_eval_episodes=pp_config.training.n_eval_episodes,
+            deterministic=True,
+            render=False,
+        ),
+        PickPlaceMetricsCallback(verbose=1 if verbose else 0),
+        SaveVecNormalizeCallback(
+            model_dir,
+            save_freq=save_freq,
+            verbose=1 if verbose else 0,
+        ),
+    ]
+
+    # Train
+    if verbose:
+        console.print("[bold]Starting training...[/bold]")
+
+    try:
+        model.learn(
+            total_timesteps=pp_config.training.total_timesteps,
+            callback=callbacks,
+            tb_log_name="PPO_PickPlace",
+        )
+
+        final_path = model_dir / "final_model"
+        model.save(str(final_path))
+        vecnorm = model.get_vec_normalize_env()
+        if vecnorm is not None:
+            vecnorm.save(str(model_dir / "vecnormalize_final.pkl"))
+
+        if verbose:
+            console.print(f"[bold green]Training complete![/bold green]")
+            console.print(f"Final model: {final_path}")
+            console.print(f"Logs: {log_dir}")
+
+    except Exception as e:
+        console.print(f"[red]Training failed: {e}[/red]")
+        raise
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+@app.command()
+def evaluate(
+    model_path: str = typer.Argument(..., help="Path to trained model (.zip)"),
+    config: Optional[str] = typer.Option(None, "--config", help="Configuration file"),
+    num_episodes: Optional[int] = typer.Option(None, help="Number of episodes"),
+    render: bool = typer.Option(True, help="Enable rendering"),
+    verbose: bool = typer.Option(True, help="Verbose output"),
+) -> None:
+    """Evaluate a trained pick-and-place RL model."""
+    import time
+
+    pp_config = load_pick_place_config(config)
+
+    if num_episodes is not None:
+        pp_config.evaluation.num_episodes = num_episodes
+    if render:
+        pp_config.evaluation.render_mode = "human"
+
+    # Load model
+    model_path = Path(model_path)
+    if not model_path.exists():
+        console.print(f"[red]Model not found: {model_path}[/red]")
+        raise typer.Exit(1)
+
+    model = PPO.load(str(model_path))
+
+    probe_env = TentaclePickPlaceEnv(
+        config=pp_config.env,
+        task_config=get_active_task(pp_config),
+    )
+    model_obs_shape = getattr(model.observation_space, "shape", None)
+    if model_obs_shape != probe_env.observation_space.shape and (
+        pp_config.env.include_relative_observations
+        or pp_config.env.include_object_velocity_in_obs
+    ):
+        probe_env.close()
+        pp_config.env.include_relative_observations = False
+        pp_config.env.include_object_velocity_in_obs = False
+        probe_env = TentaclePickPlaceEnv(
+            config=pp_config.env,
+            task_config=get_active_task(pp_config),
+        )
+        if verbose:
+            console.print(
+                "[yellow]Using legacy pick-place observation shape for this checkpoint.[/yellow]"
+            )
+    if model_obs_shape != probe_env.observation_space.shape:
+        expected_shape = probe_env.observation_space.shape
+        probe_env.close()
+        console.print(
+            f"[red]Model observation shape {model_obs_shape} does not match env "
+            f"shape {expected_shape}.[/red]"
+        )
+        raise typer.Exit(1)
+    probe_env.close()
+
+    # Curriculum disabled for evaluation (always full)
+    pp_config.env.curriculum_enabled = False
+
+    env = TentaclePickPlaceEnv(
+        config=pp_config.env,
+        render_mode=pp_config.evaluation.render_mode,
+        task_config=get_active_task(pp_config),
+    )
+
+    # Evaluate
+    grasp_count = 0
+    place_count = 0
+    episode_rewards = []
+
+    try:
+        for ep in range(pp_config.evaluation.num_episodes):
+            obs, info = env.reset()
+            ep_reward = 0.0
+            done = False
+
+            if verbose:
+                console.print(f"\nEpisode {ep + 1}/{pp_config.evaluation.num_episodes}")
+
+            while not done:
+                action, _ = model.predict(
+                    obs, deterministic=pp_config.evaluation.deterministic_actions
+                )
+                obs, reward, terminated, truncated, info = env.step(action)
+                done = terminated or truncated
+                ep_reward += reward
+
+                if pp_config.evaluation.render_mode == "human":
+                    env.render()
+                    if pp_config.evaluation.render_delay > 0:
+                        time.sleep(pp_config.evaluation.render_delay)
+
+            episode_rewards.append(ep_reward)
+            if info.get("is_grasped", False) or info.get("place_success", False):
+                grasp_count += 1
+            if info.get("place_success", False):
+                place_count += 1
+
+            if verbose:
+                console.print(f"  Reward: {ep_reward:.3f}")
+                console.print(f"  Grasp: {'Yes' if info.get('is_grasped') or info.get('place_success') else 'No'}")
+                console.print(f"  Place: {'Yes' if info.get('place_success') else 'No'}")
+
+    except KeyboardInterrupt:
+        console.print("\nEvaluation interrupted.")
+    finally:
+        env.close()
+
+    # Results
+    if episode_rewards:
+        n = len(episode_rewards)
+        console.print(f"\n{'=' * 50}")
+        console.print("[bold]EVALUATION RESULTS[/bold]")
+        console.print(f"{'=' * 50}")
+        console.print(f"Episodes: {n}")
+        console.print(f"Mean reward: {np.mean(episode_rewards):.3f} ± {np.std(episode_rewards):.3f}")
+        console.print(f"Grasp rate: {grasp_count / n * 100:.1f}%")
+        console.print(f"Place rate: {place_count / n * 100:.1f}%")
+
+
+if __name__ == "__main__":
+    app()
+

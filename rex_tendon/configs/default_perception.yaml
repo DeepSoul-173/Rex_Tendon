@@ -1,0 +1,35 @@
+perception:
+  # Model paths
+  yolo_model_path: "rex_assets/rex_models/vision/tentacle_tracking_baseline.onnx"
+
+  # Camera calibration
+  camera_calibration_path: "rex_assets/rex_hardware/calibration"
+
+  # Camera parameters
+  camera_index: 0
+  stereo_resolution: [3840, 1520]
+
+  # Detection parameters
+  confidence_threshold: 0.3
+  yolo_device: "cpu"
+
+  # Coordinate transformation parameters
+  units_to_meters: 0.05
+  rotation_angle_deg: 35
+  y_translation_m: -0.03
+
+  # Coordinate limits for triangulated points
+  coordinate_limits:
+    X:
+      clip_min: -0.15
+      clip_max: 0.15
+    Y:
+      clip_min: 0.0
+      clip_max: 0.3
+    Z:
+      clip_min: -0.7
+      clip_max: -0.05
+
+  # Visualization
+  dashboard_figure_size: [6, 6]
+

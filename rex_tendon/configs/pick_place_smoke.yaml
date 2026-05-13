@@ -1,0 +1,30 @@
+pick_place:
+  env:
+    simulation_length_seconds: 2.0
+    curriculum_enabled: false
+    randomize_dynamics: false
+    add_observation_noise: false
+    include_relative_observations: true
+    include_object_velocity_in_obs: true
+    action_smoothing_alpha: 0.45
+    max_action_delta_per_step: 0.25
+    action_jerk_penalty_scale: 0.02
+    object_progress_reward_scale: 4.0
+    stable_contact_bonus_scale: 0.1
+  training:
+    num_envs: 1
+    total_timesteps: 5000
+    eval_freq: 1000
+    n_eval_episodes: 2
+    save_freq: 1000
+  evaluation:
+    num_episodes: 3
+    render_mode: null
+  active_task: task1
+  tasks:
+    task1:
+      name: task1
+      active_object_index: 0
+      object_position: [0.08, -0.05, 0.0]
+      place_position: [-0.08, 0.08, -0.025]
+      randomize_object_position: true

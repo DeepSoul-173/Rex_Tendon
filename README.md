@@ -11,7 +11,7 @@ First, ensure you have Python 3.10+ and [Poetry](https://python-poetry.org/docs/
 
 Clone the project repository and install the dependencies:
 ```bash
-git clone https://github.com/mlecauchois/rex-tendon
+git clone https://github.com/DeepSoul-173/Rex_Tendon
 cd rex-tendon
 poetry install
 ```
@@ -197,16 +197,3 @@ python -m rex_tendon orchestrate \
 - Use direct drive motors to reduce noise
 - Add more tentacles and make it crawl
 - Ditch the 2D projection control to unlock more expressive policies
-
-## Citation
-
-```bibtex
-@misc{lecauchois2025rextendon,
-  author = {Le Cauchois, Matthieu B.},
-  title = {Rex Tendon: Expressive and Functional Control of a Soft Tentacle Robot},
-  howpublished = "\url{https://github.com/mlecauchois/rex-tendon}",
-  year = {2025}
-}
-```
-
-

@@ -95,7 +95,6 @@ python -m rex_tendon idle --duration 10 \
 ```
 
 ### 3. RL Pipeline
-![Simulation View](rex_assets/rex_media/rex_sim_realistic.png)
 
 Generate MuJoCo XML model:
 ```bash

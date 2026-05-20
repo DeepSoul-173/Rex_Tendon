@@ -92,7 +92,9 @@
     </body>
 
     <!-- Cameras -->
-    <camera name="fixed_overview" mode="fixed" pos="0 -0.55 0.75" quat="0.924 0.383 0 0" fovy="60"/>
+    <!-- Cameras -->
+    <!-- Cameras -->
+    <camera name="fixed_overview" mode="fixed" pos="0 -0.8 1.0" quat="0.924 0.383 0 0" fovy="55"/>
     <camera name="tracking_cam" mode="fixed" pos="0.35 -0.35 0.5" quat="0.854 0.354 0.146 0.354" fovy="75"/>
     <camera name="top_down" mode="fixed" pos="0 0 0.8" euler="0 0 0" fovy="60"/>
     <camera name="side_view" mode="fixed" pos="0.5 0 0.2" euler="1.5708 0 1.5708" fovy="60"/>
@@ -128,52 +130,67 @@
     <!-- Place target zone (on the desk surface) -->
     <site name="place_zone" type="cylinder" pos="-0.08 0.08 -0.025" size="0.06 0.002" rgba="0.1 0.9 0.3 0.5"/>
     <geom name="place_zone_visual" type="cylinder" pos="-0.08 0.08 -0.027" size="0.06 0.001" material="place_zone_mat" conaffinity="0" contype="0" xyaxes="1 0 0 0 1 0"/>
+    <!-- ========== THE STACK (CENTER FRONT) ========== -->
 
-    <!-- ========== GRASPABLE OBJECTS ========== -->
-
-    <!-- Object 1: Red Cube -->
-    <body name="obj_cube" pos="0.08 -0.05 0.0">
-      <freejoint name="obj_cube_joint"/>
-      <geom name="obj_cube_geom" type="box" size="0.01 0.01 0.01" material="obj_red"
-            conaffinity="1" contype="1" condim="4" friction="1.0 0.005 0.001" mass="0.01"
-            xyaxes="1 0 0 0 1 0" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <body name="obj_cube" pos="0.0 0.05 0.05">
+      <freejoint/>
+      <geom type="box" size="0.01 0.01 0.01" material="obj_red" mass="0.02" friction="1 0.05 0.01"/>
       <site name="obj_cube_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
     </body>
 
-    <!-- Object 2: Blue Cylinder -->
-    <body name="obj_cylinder" pos="-0.06 -0.06 0.0">
-      <freejoint name="obj_cylinder_joint"/>
-      <geom name="obj_cylinder_geom" type="cylinder" size="0.01 0.01" material="obj_blue"
-            conaffinity="1" contype="1" condim="4" friction="1.0 0.005 0.001" mass="0.01"
-            xyaxes="1 0 0 0 1 0" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <body name="obj_cube_purple" pos="0.0 0.05 0.08">
+      <freejoint/>
+      <geom type="box" size="0.01 0.01 0.01" rgba="0.8 0.2 1.0 1.0" mass="0.02" friction="1 0.05 0.01"/>
+      <site name="obj_cube_purple_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
+    </body>
+
+    <body name="obj_cube_yellow" pos="0.0 0.05 0.11">
+      <freejoint/>
+      <geom type="box" size="0.01 0.01 0.01" rgba="1.0 1.0 0.2 1.0" mass="0.02" friction="1 0.05 0.01"/>
+      <site name="obj_cube_yellow_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
+    </body>
+
+    <body name="obj_cylinder" pos="-0.05 0.05 0.05">
+      <freejoint/>
+      <geom type="cylinder" size="0.01 0.015" material="obj_blue" mass="0.02" friction="1 0.05 0.01"/>
       <site name="obj_cylinder_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
     </body>
 
-    <!-- Object 3: Green Sphere -->
-    <body name="obj_sphere" pos="0.04 0.08 -0.01">
-      <freejoint name="obj_sphere_joint"/>
-      <geom name="obj_sphere_geom" type="sphere" size="0.01" material="obj_green"
-            conaffinity="1" contype="1" condim="4" friction="1.0 0.005 0.001" mass="0.01"
-            solref="0.02 1" solimp="0.9 0.95 0.001"/>
-      <site name="obj_sphere_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
+    <body name="obj_bar" pos="0.05 0.05 0.05">
+      <freejoint/>
+      <geom type="capsule" size="0.008 0.04" material="obj_green" mass="0.03" friction="1 0.05 0.01" euler="0 1.57 0"/>
+      <site name="obj_bar_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
     </body>
 
-    <!-- Object 4: Purple Capsule -->
-    <body name="obj_capsule" pos="-0.04 -0.08 0.0">
-      <freejoint name="obj_capsule_joint"/>
-      <geom name="obj_capsule_geom" type="capsule" size="0.01 0.01" rgba="0.8 0.2 1.0 1.0"
-            conaffinity="1" contype="1" condim="4" friction="1.0 0.005 0.001" mass="0.01"
-            solref="0.02 1" solimp="0.9 0.95 0.001"/>
-      <site name="obj_capsule_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
+    <!-- 5 Extra Cubes -->
+    <body name="obj_cube_extra_1" pos="0.0 0.10 0.05">
+      <freejoint/>
+      <geom type="box" size="0.01 0.01 0.01" rgba="1.0 0.5 0.0 1.0" mass="0.02" friction="1 0.05 0.01"/>
+      <site name="obj_cube_extra_1_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
     </body>
 
-    <!-- Object 5: Yellow Box2 -->
-    <body name="obj_box2" pos="0.08 0.08 0.0">
-      <freejoint name="obj_box2_joint"/>
-      <geom name="obj_box2_geom" type="box" size="0.012 0.012 0.012" rgba="1.0 1.0 0.2 1.0"
-            conaffinity="1" contype="1" condim="4" friction="1.0 0.005 0.001" mass="0.02"
-            solref="0.02 1" solimp="0.9 0.95 0.001"/>
-      <site name="obj_box2_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
+    <body name="obj_cube_extra_2" pos="0.0 0.10 0.08">
+      <freejoint/>
+      <geom type="box" size="0.01 0.01 0.01" rgba="0.0 1.0 1.0 1.0" mass="0.02" friction="1 0.05 0.01"/>
+      <site name="obj_cube_extra_2_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
+    </body>
+
+    <body name="obj_cube_extra_3" pos="0.0 0.10 0.11">
+      <freejoint/>
+      <geom type="box" size="0.01 0.01 0.01" rgba="1.0 0.0 1.0 1.0" mass="0.02" friction="1 0.05 0.01"/>
+      <site name="obj_cube_extra_3_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
+    </body>
+
+    <body name="obj_cube_extra_4" pos="-0.05 0.10 0.05">
+      <freejoint/>
+      <geom type="box" size="0.01 0.01 0.01" rgba="0.5 0.5 0.5 1.0" mass="0.02" friction="1 0.05 0.01"/>
+      <site name="obj_cube_extra_4_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
+    </body>
+
+    <body name="obj_cube_extra_5" pos="0.05 0.10 0.05">
+      <freejoint/>
+      <geom type="box" size="0.01 0.01 0.01" rgba="0.0 0.5 0.5 1.0" mass="0.02" friction="1 0.05 0.01"/>
+      <site name="obj_cube_extra_5_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
     </body>
 
     <!-- ========== TENTACLE ROBOT ========== -->
@@ -398,7 +415,18 @@
     </body>
   </worldbody>
 
-  <!-- Equality constraints removed for programmatic grasping -->
+  <equality>
+    <weld name="grasp_cube" body1="body21" body2="obj_cube" active="false"/>
+    <weld name="grasp_cylinder" body1="body21" body2="obj_cylinder" active="false"/>
+    <weld name="grasp_bar" body1="body21" body2="obj_bar" active="false"/>
+    <weld name="grasp_purple" body1="body21" body2="obj_cube_purple" active="false"/>
+    <weld name="grasp_yellow" body1="body21" body2="obj_cube_yellow" active="false"/>
+    <weld name="grasp_extra_1" body1="body21" body2="obj_cube_extra_1" active="false"/>
+    <weld name="grasp_extra_2" body1="body21" body2="obj_cube_extra_2" active="false"/>
+    <weld name="grasp_extra_3" body1="body21" body2="obj_cube_extra_3" active="false"/>
+    <weld name="grasp_extra_4" body1="body21" body2="obj_cube_extra_4" active="false"/>
+    <weld name="grasp_extra_5" body1="body21" body2="obj_cube_extra_5" active="false"/>
+  </equality>
 
   <tendon>
     <spatial name="tendon_1" width="0.001" rgba="1 0 0 1">

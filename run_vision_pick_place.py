@@ -13,6 +13,7 @@ except ImportError:
 
 try:
     from stable_baselines3 import PPO
+    from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 except ImportError:
     print("Please install stable_baselines3 to load the RL model: pip install stable-baselines3")
     exit(1)
@@ -54,19 +55,33 @@ def main():
         env.renderer.close()
     env.renderer = mujoco.Renderer(env.model, height=480, width=480)
     
-    # Switch to the corner camera for better view of lifting
-    env.renderer.update_scene(env.data, camera="fixed_overview")
+    # Switch to the workspace camera for better view of lifting
+    env.renderer.update_scene(env.data, camera="workspace_cam")
+
+    # Wrap environment with normalization if stats file exists
+    stats_path = rl_model_path.parent / "vecnormalize.pkl"
+    if stats_path.exists():
+        print(f"Loading normalization stats from {stats_path}...")
+        venv = DummyVecEnv([lambda: env])
+        venv = VecNormalize.load(str(stats_path), venv)
+        venv.training = False
+        venv.norm_reward = False
+        active_env = venv
+    else:
+        print("Warning: No normalization stats found. Model might not move correctly.")
+        active_env = env
 
     # Load YOLO Model
     print("Loading YOLO Model...")
     yolo_detector = YOLO(args.yolo_model)
 
-    obs, info = env.reset()
+    obs = active_env.reset()
     
     # State tracking for CV logic
     cv_picked_status = False
-    base_y_center = None
-    lift_threshold = 20 # pixels
+    base_y_bottom = None
+    lift_threshold = 30 # pixels
+    ground_calibration_frames = 0
     
     window_name = "YOLO Vision - Pick & Place"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -76,82 +91,86 @@ def main():
     
     episodes = 20
     for ep in range(episodes):
-        obs, info = env.reset()
+        obs = active_env.reset()
         done = False
-        base_y_center = None
+        base_y_bottom = None
         cv_picked_status = False
+        grasp_buffer = 0  
+        ground_calibration_frames = 0
+        
+        print(f"\n--- Starting Episode {ep+1} ---")
         
         while not done:
             # Predict action using RL policy
             action, _ = rl_model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
+            
+            if isinstance(active_env, VecNormalize):
+                obs, reward, dones, infos = active_env.step(action)
+                done = dones[0]
+                info = infos[0]
+            else:
+                obs, reward, terminated, truncated, info = active_env.step(action)
+                done = terminated or truncated
 
             # Render frame
-            # Force update scene from a specific camera
-            env.renderer.update_scene(env.data, camera="fixed_overview")
-            frame = env.render() # Returns RGB array
+            env.renderer.update_scene(env.data, camera="workspace_cam")
+            frame = env.render() 
             
             if frame is None:
                 continue
 
-            # Convert RGB to BGR for OpenCV
             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            frame_bgr = cv2.resize(frame_bgr, (640, 640))
 
-            # Resize the image to 640x640 so YOLO works better and text fits
-            frame_bgr = cv2.resize(frame_bgr, (640, 640), interpolation=cv2.INTER_LINEAR)
-
-            # --- COMPUTER VISION LOGIC (YOLO) ---
-            # Run YOLO detection
-            results = yolo_detector.predict(frame_bgr, verbose=False, conf=0.1)
+            # Run YOLO detection with higher confidence threshold for speed
+            results = yolo_detector.predict(frame_bgr, verbose=False, conf=0.25)
             
             detected_object = None
-            max_conf = 0.0
-            
-            # Find the most confident detection (the object we are picking)
             if len(results) > 0 and len(results[0].boxes) > 0:
-                for box in results[0].boxes:
-                    conf = float(box.conf[0])
-                    if conf > max_conf:
-                        max_conf = conf
-                        x1, y1, x2, y2 = map(int, box.xyxy[0])
-                        detected_object = (x1, y1, x2, y2)
+                box = results[0].boxes[0] # Just take the top one
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                detected_object = (x1, y1, x2, y2)
             
-            # Draw detections and apply "Pick" intelligence
             if detected_object:
                 x1, y1, x2, y2 = detected_object
-                cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                # Thicker box for better visibility
+                cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), 3)
                 
-                y_center = (y1 + y2) / 2
+                if ground_calibration_frames < 5:
+                    base_y_bottom = y2
+                    ground_calibration_frames += 1
                 
-                # Intelligence logic: If object moves up significantly, it's picked
-                if base_y_center is None:
-                    base_y_center = y_center
-                
-                # Y axis goes down in image coordinates. So smaller Y means higher.
-                if (base_y_center - y_center) > lift_threshold:
-                    cv_picked_status = True
+                if (base_y_bottom - y2) > lift_threshold:
+                    grasp_buffer = min(grasp_buffer + 1, 15)
                 else:
-                    cv_picked_status = False
+                    grasp_buffer = max(grasp_buffer - 1, 0)
+            else:
+                # If object is lost, slowly drain the buffer
+                grasp_buffer = max(grasp_buffer - 2, 0)
             
-            # Display Status
+            cv_picked_status = grasp_buffer > 10
+            
+            # Text Overlays
             status_text = "PICKED" if cv_picked_status else "NOT PICKED"
             color = (0, 255, 0) if cv_picked_status else (0, 0, 255)
             cv2.putText(frame_bgr, f"CV Status: {status_text}", (20, 40), 
                         cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
             
-            # Show actual simulation info for comparison
             sim_grasped = info.get("is_grasped", False)
             cv2.putText(frame_bgr, f"Sim Grasp: {sim_grasped}", (20, 80),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
 
-            # Display the frame
             cv2.imshow(window_name, frame_bgr)
             
-            if cv2.waitKey(60) & 0xFF == ord('q'):
+            # Using 1ms instead of 60ms makes it much more responsive to 'q'
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("Quitting...")
                 env.close()
                 cv2.destroyAllWindows()
                 return
+                
+    env.close()
+    cv2.destroyAllWindows()
                 
     env.close()
     cv2.destroyAllWindows()

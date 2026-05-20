@@ -34,31 +34,35 @@ class PickPlaceEnvConfig(BaseConfig):
 
     # Object names (must match XML)
     object_names: List[str] = Field(
-        default=["obj_cube", "obj_cylinder", "obj_sphere"],
+        default=["obj_cube", "obj_cylinder", "obj_bar", "obj_cube_purple", "obj_cube_yellow",
+                 "obj_cube_extra_1", "obj_cube_extra_2", "obj_cube_extra_3", "obj_cube_extra_4", "obj_cube_extra_5"],
         description="Names of graspable object bodies in XML",
     )
     object_site_names: List[str] = Field(
-        default=["obj_cube_site", "obj_cylinder_site", "obj_sphere_site"],
+        default=["obj_cube_site", "obj_cylinder_site", "obj_bar_site", "obj_cube_purple_site", "obj_cube_yellow_site",
+                 "obj_cube_extra_1_site", "obj_cube_extra_2_site", "obj_cube_extra_3_site", "obj_cube_extra_4_site", "obj_cube_extra_5_site"],
         description="Names of object site elements for position tracking",
     )
     object_geom_names: List[str] = Field(
-        default=["obj_cube_geom", "obj_cylinder_geom", "obj_sphere_geom"],
+        default=["obj_cube_geom", "obj_cylinder_geom", "obj_bar_geom", "obj_cube_purple_geom", "obj_cube_yellow_geom",
+                 "obj_cube_extra_1_geom", "obj_cube_extra_2_geom", "obj_cube_extra_3_geom", "obj_cube_extra_4_geom", "obj_cube_extra_5_geom"],
         description="Names of object geom elements",
     )
     grasp_constraint_names: List[str] = Field(
-        default=["grasp_cube", "grasp_cylinder", "grasp_sphere"],
+        default=["grasp_cube", "grasp_cylinder", "grasp_bar", "grasp_purple", "grasp_yellow",
+                 "grasp_extra_1", "grasp_extra_2", "grasp_extra_3", "grasp_extra_4", "grasp_extra_5"],
         description="Names of weld equality constraints for grasping",
     )
 
     # Grasping parameters
     grasp_distance_threshold: float = Field(
-        default=0.06, description="Distance threshold for grasping (meters)"
+        default=0.10, description="Distance threshold for grasping (meters) - increased for easier learning"
     )
     grasp_consecutive_steps: int = Field(
-        default=3, description="Consecutive steps within threshold to trigger grasp"
+        default=2, description="Consecutive steps within threshold to trigger grasp"
     )
     place_distance_threshold: float = Field(
-        default=0.06, description="Distance threshold for successful placement (meters)"
+        default=0.10, description="Distance threshold for successful placement (meters)"
     )
 
     # Reward shaping
@@ -91,8 +95,9 @@ class PickPlaceEnvConfig(BaseConfig):
         default=0.0,
         description="Small bonus scale for maintaining close tip/object contact",
     )
+    # Assisted Grasping (Magnetic-like grip)
     assisted_grasp_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Kinematically carries object after grasp for curriculum training",
     )
     assisted_grasp_follow_alpha: float = Field(
@@ -105,10 +110,10 @@ class PickPlaceEnvConfig(BaseConfig):
         default=True, description="Enable curriculum learning"
     )
     reach_only_steps: int = Field(
-        default=500_000, description="Steps for reach-only phase"
+        default=0, description="Steps for reach-only phase - set to 0 to jump straight to grasping"
     )
     reach_grasp_steps: int = Field(
-        default=2_000_000, description="Steps for reach+grasp phase (cumulative)"
+        default=500_000, description="Steps for reach+grasp phase (cumulative)"
     )
 
     # Observation settings

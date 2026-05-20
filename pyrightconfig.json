@@ -1,0 +1,12 @@
+{
+    "typeCheckingMode": "basic",
+    "pythonVersion": "3.12",
+    "venvPath": ".",
+    "venv": ".venv",
+    "reportMissingTypeStubs": "none",
+    "reportAttributeAccessIssue": "none",
+    "reportArgumentType": "none",
+    "reportReturnType": "none",
+    "reportGeneralTypeIssues": "none",
+    "reportOptionalMemberAccess": "none"
+}

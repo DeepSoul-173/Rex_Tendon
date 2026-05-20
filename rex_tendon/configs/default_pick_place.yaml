@@ -13,10 +13,10 @@ pick_place:
     place_zone_site_name: "place_zone"
 
     # Object configuration
-    object_names: ["obj_cube", "obj_cylinder", "obj_sphere", "obj_capsule", "obj_box2"]
-    object_site_names: ["obj_cube_site", "obj_cylinder_site", "obj_sphere_site", "obj_capsule_site", "obj_box2_site"]
-    object_geom_names: ["obj_cube_geom", "obj_cylinder_geom", "obj_sphere_geom", "obj_capsule_geom", "obj_box2_geom"]
-    grasp_constraint_names: ["grasp_cube", "grasp_cylinder", "grasp_sphere", "grasp_capsule", "grasp_box2"]
+    object_names: ["obj_cube", "obj_cylinder", "obj_bar", "obj_cube_purple", "obj_cube_yellow", "obj_cube_extra_1", "obj_cube_extra_2", "obj_cube_extra_3", "obj_cube_extra_4", "obj_cube_extra_5"]
+    object_site_names: ["obj_cube_site", "obj_cylinder_site", "obj_bar_site", "obj_cube_purple_site", "obj_cube_yellow_site", "obj_cube_extra_1_site", "obj_cube_extra_2_site", "obj_cube_extra_3_site", "obj_cube_extra_4_site", "obj_cube_extra_5_site"]
+    object_geom_names: ["obj_cube_geom", "obj_cylinder_geom", "obj_bar_geom", "obj_cube_purple_geom", "obj_cube_yellow_geom", "obj_cube_extra_1_geom", "obj_cube_extra_2_geom", "obj_cube_extra_3_geom", "obj_cube_extra_4_geom", "obj_cube_extra_5_geom"]
+    grasp_constraint_names: ["grasp_cube", "grasp_cylinder", "grasp_bar", "grasp_purple", "grasp_yellow", "grasp_extra_1", "grasp_extra_2", "grasp_extra_3", "grasp_extra_4", "grasp_extra_5"]
 
     # Grasping parameters
     grasp_distance_threshold: 0.06

@@ -1,7 +1,7 @@
 <?xml version="1.0" ?>
 <mujoco model="tentacle_pick_place">
   <compiler angle="radian" autolimits="true"/>
-  <option timestep="0.002" iterations="100" gravity="0 0 -9.81"/>
+  <option timestep="0.002" iterations="120" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"/>
 
   <default>
     <joint stiffness="0.0" damping="0.0" range="0 0.9"/>
@@ -70,7 +70,7 @@
     <!-- Desk -->
     <body name="desk" pos="0 0 -0.02">
       <!-- Table top -->
-      <geom name="table_top" type="box" pos="0 0 0" size="0.25 0.35 0.02" material="wood_material" conaffinity="1" contype="1" condim="3" xyaxes="1 0 0 0 1 0" friction="0.8 0.005 0.001" mass="5.0"/>
+      <geom name="table_top" type="box" pos="0 0 0" size="0.25 0.35 0.02" material="wood_material" conaffinity="1" contype="1" condim="4" xyaxes="1 0 0 0 1 0" friction="1.2 0.01 0.001" solref="0.006 1" solimp="0.95 0.99 0.001" mass="5.0"/>
       <!-- Table legs -->
       <geom name="leg1" type="cylinder" pos="0.22 0.32 -0.25" size="0.015 0.23" material="wood_material" conaffinity="1" contype="1" xyaxes="1 0 0 0 1 0"/>
       <geom name="leg2" type="cylinder" pos="-0.22 0.32 -0.25" size="0.015 0.23" material="wood_material" conaffinity="1" contype="1" xyaxes="1 0 0 0 1 0"/>
@@ -87,8 +87,10 @@
       <geom name="cam_body" type="box" size="0.015 0.012 0.012" material="camera_body" conaffinity="0" contype="0" xyaxes="1 0 0 0 1 0"/>
       <geom name="cam_lens" type="cylinder" pos="0.016 0 0" size="0.006 0.003" material="camera_lens" conaffinity="0" contype="0" euler="0 1.5708 0"/>
       <geom name="cam_mount" type="box" pos="-0.02 0 -0.015" size="0.005 0.008 0.015" material="metal_base" conaffinity="0" contype="0" xyaxes="1 0 0 0 1 0"/>
-      <!-- Camera viewpoint -->
-      <camera name="robot_cam" mode="fixed" pos="0.016 0 0" euler="0 1.5708 0" fovy="60"/>
+      <!-- Camera viewpoint: elevated robot's-eye looking down at the workspace
+           (local pos is relative to the camera_module body at 0.07 0 0.04, so
+           world pos ≈ 0.10 -0.12 0.15, aimed at the table centre). -->
+      <camera name="robot_cam" mode="fixed" pos="0.03 -0.12 0.11" xyaxes="0.848 0.530 0 -0.316 0.505 0.803" fovy="60"/>
     </body>
 
     <!-- Cameras -->
@@ -98,8 +100,9 @@
     <camera name="tracking_cam" mode="fixed" pos="0.35 -0.35 0.5" quat="0.854 0.354 0.146 0.354" fovy="75"/>
     <camera name="top_down" mode="fixed" pos="0 0 0.8" euler="0 0 0" fovy="60"/>
     <camera name="side_view" mode="fixed" pos="0.5 0 0.2" euler="1.5708 0 1.5708" fovy="60"/>
-    <!-- Workspace camera showing desk and objects -->
-    <camera name="workspace_cam" mode="fixed" pos="0.15 -0.25 0.15" euler="0 0.785 0" fovy="55"/>
+    <!-- Workspace camera: elevated 3/4 view framing the desk and all objects
+         (look-at the table centre, for the YOLO vision demo). -->
+    <camera name="workspace_cam" mode="fixed" pos="0.20 -0.28 0.24" xyaxes="0.832 0.555 0 -0.279 0.419 0.864" fovy="55"/>
 
     <!-- ===== CORNER TABLE CAMERA STAND ===== -->
     <!-- Mounted at far corner of table, covers full robot work envelope -->
@@ -128,74 +131,80 @@
     <site name="ghost_cursor" type="sphere" size="0.01 0.01 0.01" rgba="1 1 1 0.3" pos="0 0 0"/>
 
     <!-- Place target zone (on the desk surface) -->
-    <site name="place_zone" type="cylinder" pos="-0.08 0.08 -0.025" size="0.06 0.002" rgba="0.1 0.9 0.3 0.5"/>
-    <geom name="place_zone_visual" type="cylinder" pos="-0.08 0.08 -0.027" size="0.06 0.001" material="place_zone_mat" conaffinity="0" contype="0" xyaxes="1 0 0 0 1 0"/>
+    <site name="place_zone" type="cylinder" pos="-0.08 0.08 0.002" size="0.06 0.002" rgba="0.1 0.9 0.3 0.5"/>
+    <geom name="place_zone_visual" type="cylinder" pos="-0.08 0.08 0.000" size="0.06 0.001" material="place_zone_mat" conaffinity="0" contype="0" xyaxes="1 0 0 0 1 0"/>
     <!-- ========== THE STACK (CENTER FRONT) ========== -->
 
-    <body name="obj_cube" pos="0.0 0.05 0.05">
+    <body name="obj_cube" pos="0.06 -0.05 0.012">
       <freejoint/>
-      <geom type="box" size="0.01 0.01 0.01" material="obj_red" mass="0.02" friction="1 0.05 0.01"/>
+      <geom name="obj_cube_geom" type="box" size="0.01 0.01 0.01" material="obj_red" mass="0.02" contype="1" conaffinity="1" condim="4" margin="0.001" solref="0.006 1" solimp="0.95 0.99 0.001" friction="1.2 0.05 0.01"/>
       <site name="obj_cube_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
     </body>
 
-    <body name="obj_cube_purple" pos="0.0 0.05 0.08">
+    <body name="obj_cube_purple" pos="-0.06 -0.05 0.012">
       <freejoint/>
-      <geom type="box" size="0.01 0.01 0.01" rgba="0.8 0.2 1.0 1.0" mass="0.02" friction="1 0.05 0.01"/>
+      <geom name="obj_cube_purple_geom" type="box" size="0.01 0.01 0.01" rgba="0.8 0.2 1.0 1.0" mass="0.02" contype="1" conaffinity="1" condim="4" margin="0.001" solref="0.006 1" solimp="0.95 0.99 0.001" friction="1.2 0.05 0.01"/>
       <site name="obj_cube_purple_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
     </body>
 
-    <body name="obj_cube_yellow" pos="0.0 0.05 0.11">
+    <body name="obj_cube_yellow" pos="0.16 -0.05 0.012">
       <freejoint/>
-      <geom type="box" size="0.01 0.01 0.01" rgba="1.0 1.0 0.2 1.0" mass="0.02" friction="1 0.05 0.01"/>
+      <geom name="obj_cube_yellow_geom" type="box" size="0.01 0.01 0.01" rgba="1.0 1.0 0.2 1.0" mass="0.02" contype="1" conaffinity="1" condim="4" margin="0.001" solref="0.006 1" solimp="0.95 0.99 0.001" friction="1.2 0.05 0.01"/>
       <site name="obj_cube_yellow_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
     </body>
 
-    <body name="obj_cylinder" pos="-0.05 0.05 0.05">
+    <body name="obj_cylinder" pos="-0.16 -0.05 0.008">
       <freejoint/>
-      <geom type="cylinder" size="0.01 0.015" material="obj_blue" mass="0.02" friction="1 0.05 0.01"/>
+      <geom name="obj_cylinder_geom" type="cylinder" size="0.013 0.007" material="obj_blue" mass="0.02" contype="1" conaffinity="1" condim="4" margin="0.001" solref="0.006 1" solimp="0.95 0.99 0.001" friction="1.2 0.05 0.01"/>
       <site name="obj_cylinder_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
     </body>
 
-    <body name="obj_bar" pos="0.05 0.05 0.05">
+    <body name="obj_bar" pos="0.0 -0.26 0.009">
       <freejoint/>
-      <geom type="capsule" size="0.008 0.04" material="obj_green" mass="0.03" friction="1 0.05 0.01" euler="0 1.57 0"/>
+      <geom name="obj_bar_geom" type="capsule" size="0.008 0.04" material="obj_green" mass="0.03" contype="1" conaffinity="1" condim="4" margin="0.001" solref="0.006 1" solimp="0.95 0.99 0.001" friction="1.2 0.05 0.01" euler="0 1.57 0"/>
       <site name="obj_bar_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
     </body>
 
     <!-- 5 Extra Cubes -->
-    <body name="obj_cube_extra_1" pos="0.0 0.10 0.05">
+    <body name="obj_cube_extra_1" pos="0.06 -0.15 0.012">
       <freejoint/>
-      <geom type="box" size="0.01 0.01 0.01" rgba="1.0 0.5 0.0 1.0" mass="0.02" friction="1 0.05 0.01"/>
+      <geom name="obj_cube_extra_1_geom" type="box" size="0.01 0.01 0.01" rgba="1.0 0.5 0.0 1.0" mass="0.02" contype="1" conaffinity="1" condim="4" margin="0.001" solref="0.006 1" solimp="0.95 0.99 0.001" friction="1.2 0.05 0.01"/>
       <site name="obj_cube_extra_1_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
     </body>
 
-    <body name="obj_cube_extra_2" pos="0.0 0.10 0.08">
+    <body name="obj_cube_extra_2" pos="-0.06 -0.15 0.012">
       <freejoint/>
-      <geom type="box" size="0.01 0.01 0.01" rgba="0.0 1.0 1.0 1.0" mass="0.02" friction="1 0.05 0.01"/>
+      <geom name="obj_cube_extra_2_geom" type="box" size="0.01 0.01 0.01" rgba="0.0 1.0 1.0 1.0" mass="0.02" contype="1" conaffinity="1" condim="4" margin="0.001" solref="0.006 1" solimp="0.95 0.99 0.001" friction="1.2 0.05 0.01"/>
       <site name="obj_cube_extra_2_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
     </body>
 
-    <body name="obj_cube_extra_3" pos="0.0 0.10 0.11">
+    <body name="obj_cube_extra_3" pos="0.16 -0.15 0.012">
       <freejoint/>
-      <geom type="box" size="0.01 0.01 0.01" rgba="1.0 0.0 1.0 1.0" mass="0.02" friction="1 0.05 0.01"/>
+      <geom name="obj_cube_extra_3_geom" type="box" size="0.01 0.01 0.01" rgba="1.0 0.0 1.0 1.0" mass="0.02" contype="1" conaffinity="1" condim="4" margin="0.001" solref="0.006 1" solimp="0.95 0.99 0.001" friction="1.2 0.05 0.01"/>
       <site name="obj_cube_extra_3_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
     </body>
 
-    <body name="obj_cube_extra_4" pos="-0.05 0.10 0.05">
+    <body name="obj_cube_extra_4" pos="-0.16 -0.15 0.012">
       <freejoint/>
-      <geom type="box" size="0.01 0.01 0.01" rgba="0.5 0.5 0.5 1.0" mass="0.02" friction="1 0.05 0.01"/>
+      <geom name="obj_cube_extra_4_geom" type="box" size="0.01 0.01 0.01" rgba="0.5 0.5 0.5 1.0" mass="0.02" contype="1" conaffinity="1" condim="4" margin="0.001" solref="0.006 1" solimp="0.95 0.99 0.001" friction="1.2 0.05 0.01"/>
       <site name="obj_cube_extra_4_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
     </body>
 
-    <body name="obj_cube_extra_5" pos="0.05 0.10 0.05">
+    <body name="obj_cube_extra_5" pos="0.16 0.07 0.012">
       <freejoint/>
-      <geom type="box" size="0.01 0.01 0.01" rgba="0.0 0.5 0.5 1.0" mass="0.02" friction="1 0.05 0.01"/>
+      <geom name="obj_cube_extra_5_geom" type="box" size="0.01 0.01 0.01" rgba="0.0 0.5 0.5 1.0" mass="0.02" contype="1" conaffinity="1" condim="4" margin="0.001" solref="0.006 1" solimp="0.95 0.99 0.001" friction="1.2 0.05 0.01"/>
       <site name="obj_cube_extra_5_site" pos="0 0 0" size="0.002" rgba="1 1 1 0"/>
     </body>
 
     <!-- ========== TENTACLE ROBOT ========== -->
     <body name="body1" pos="0 0 0.022">
       <geom name="geom1" type="mesh" mesh="mesh1" contype="1" conaffinity="0"/>
+      <!-- Base yaw: rotates the whole tentacle about the vertical axis. This is
+           the 3rd actuated task-DOF (true twist), held at 0 during RL. -->
+      <!-- Yaw is heavily damped on purpose: rotating the compliant 20-joint
+           backbone is a slow mode, so prioritise a stable, overshoot-free
+           reorientation over a snappy (oscillating) one. -->
+      <joint type="hinge" name="base_yaw" axis="0 0 1" pos="0 0 0" range="-1.5708 1.5708" damping="50.0" stiffness="0.0"/>
       <body name="body2" pos="0 0 0">
         <geom name="geom2" type="mesh" mesh="mesh2" contype="1" conaffinity="0"/>
         <joint type="ball" name="joint1" pos="0 0 0.0143255" stiffness="0.14107" damping="0.05"/>
@@ -259,9 +268,9 @@
 
                                               <!-- Tip contact geom - enables collision with objects -->
                                               <geom name="tip_contact" type="sphere" pos="0 0 0.230871" size="0.008"
-                                                    contype="1" conaffinity="1" condim="4" friction="2.0 0.01 0.001"
+                                                    contype="1" conaffinity="1" condim="4" friction="2.0 0.02 0.001"
                                                     material="tip_contact_mat" mass="0.001"
-                                                    solref="0.1 1" solimp="0.3 0.95 0.05"/>
+                                                    solref="0.006 1" solimp="0.95 0.99 0.001"/>
 
                                               <site name="tip_center" pos="0 0 0.230871" size="0.003" rgba="0 1 0 1"/>
 
@@ -504,6 +513,8 @@
     <position name="actuator_1" tendon="tendon_1" kp="200.0" forcerange="-200 0" ctrlrange="0.120 0.340"/>
     <position name="actuator_2" tendon="tendon_2" kp="200.0" forcerange="-200 0" ctrlrange="0.120 0.340"/>
     <position name="actuator_3" tendon="tendon_3" kp="200.0" forcerange="-200 0" ctrlrange="0.120 0.340"/>
+    <!-- Base-yaw position actuator (true twist DOF). ctrl is target yaw in rad. -->
+    <position name="base_yaw_act" joint="base_yaw" kp="200.0" ctrlrange="-1.5708 1.5708"/>
   </actuator>
 
   <sensor>

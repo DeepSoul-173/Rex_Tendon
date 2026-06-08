@@ -40,6 +40,24 @@ class PickPlaceEnvConfig(BaseConfig):
         description="How many objects to spawn on the desk per episode (clamped to available bodies)",
     )
 
+    # Multi-object curriculum (used by `pick-place train-multi`). When enabled and
+    # a shared curriculum counter is provided, the per-episode object count is read
+    # from that counter and ramps from min to max as the policy masters each level.
+    object_curriculum_enabled: bool = Field(
+        default=False, description="Ramp the spawned-object count over training"
+    )
+    min_spawned_objects: int = Field(
+        default=2, description="Object count at the first curriculum level"
+    )
+    max_spawned_objects: int = Field(
+        default=5, description="Object count at the final curriculum level"
+    )
+    occlusion_radius: float = Field(
+        default=0.05,
+        description="Target-clutter/occlusion proxy: another object within this XY "
+        "radius of the active target counts the episode as occluded (state-based proxy)",
+    )
+
     # Object names (must match XML)
     object_names: List[str] = Field(
         default=["obj_cube", "obj_cylinder", "obj_bar", "obj_cube_purple", "obj_cube_yellow",

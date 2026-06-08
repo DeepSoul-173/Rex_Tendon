@@ -58,12 +58,16 @@ class TentaclePickPlaceEnv(gym.Env):
         render_mode: Optional[str] = None,
         global_step_counter: Any = None,
         task_config=None,
+        object_curriculum_state: Any = None,
     ):
         super().__init__()
 
         self.config = config or PickPlaceEnvConfig()
         self.render_mode = render_mode
         self.task_config = task_config
+        # Shared (cross-process) counter holding the current curriculum object
+        # count; ramped by MultiObjectCurriculumCallback. None => static count.
+        self._object_curriculum_state = object_curriculum_state
 
         # Global step counter for curriculum learning (shared across envs)
         # Use a mutable list so it can be shared: [current_step]
@@ -157,6 +161,14 @@ class TentaclePickPlaceEnv(gym.Env):
         self.object_spawn_min = np.array(self.config.object_spawn_bounds_min)
         self.object_spawn_max = np.array(self.config.object_spawn_bounds_max)
         self.num_spawned_objects = int(self.config.num_spawned_objects)
+        self.object_curriculum_enabled = self.config.object_curriculum_enabled
+        self.min_spawned_objects = int(self.config.min_spawned_objects)
+        self.max_spawned_objects = int(self.config.max_spawned_objects)
+        self.occlusion_radius = float(self.config.occlusion_radius)
+        # Per-episode multi-object metrics (read by the curriculum callback).
+        self._episode_num_objects = self.num_spawned_objects
+        self._episode_collision = False
+        self._episode_occluded = False
 
         # MuJoCo IDs
         self.tip_site_id = mujoco.mj_name2id(
@@ -411,6 +423,59 @@ class TentaclePickPlaceEnv(gym.Env):
         else:
             return PickPlacePhase.FULL
 
+    def _current_num_objects(self) -> int:
+        """Resolve how many objects to spawn this episode (curriculum-aware)."""
+        if self.object_curriculum_enabled and self._object_curriculum_state is not None:
+            state = self._object_curriculum_state
+            if hasattr(state, "value"):
+                n = int(state.value)
+            elif isinstance(state, (list, tuple)):
+                n = int(state[0])
+            else:
+                n = int(state)
+            n = int(np.clip(n, self.min_spawned_objects, self.max_spawned_objects))
+        else:
+            n = self.num_spawned_objects
+        return max(1, min(n, len(self.object_body_ids)))
+
+    def _compute_occlusion(self) -> bool:
+        """Geometric target-clutter proxy: any other spawned object within
+        occlusion_radius (XY) of the active object."""
+        active_xy = self._get_object_position(self.active_object_idx)[:2]
+        for i in range(self._episode_num_objects):
+            if i == self.active_object_idx:
+                continue
+            other_xy = self._get_object_position(i)[:2]
+            if float(np.linalg.norm(active_xy - other_xy)) < self.occlusion_radius:
+                return True
+        return False
+
+    def _compute_collision(self) -> bool:
+        """True if the tip contacts a non-active spawned object, or two spawned
+        objects contact each other (clutter-induced disturbance)."""
+        if self.tip_geom_id < 0:
+            return False
+        spawned = {
+            self.object_geom_ids[i]
+            for i in range(self._episode_num_objects)
+            if self.object_geom_ids[i] >= 0
+        }
+        active_geom = (
+            self.object_geom_ids[self.active_object_idx]
+            if self.active_object_idx < len(self.object_geom_ids)
+            else -1
+        )
+        for c in range(self.data.ncon):
+            con = self.data.contact[c]
+            g1, g2 = int(con.geom1), int(con.geom2)
+            if self.tip_geom_id in (g1, g2):
+                other = g2 if g1 == self.tip_geom_id else g1
+                if other in spawned and other != active_geom:
+                    return True
+            elif g1 in spawned and g2 in spawned:
+                return True
+        return False
+
     def _get_tip_position(self) -> np.ndarray:
         """Get tentacle tip position."""
         return self.data.site_xpos[self.tip_site_id].copy()
@@ -549,7 +614,7 @@ class TentaclePickPlaceEnv(gym.Env):
 
     def _randomize_object_positions(self):
         """Randomize positions of graspable objects on the desk."""
-        num_cubes = max(1, min(self.num_spawned_objects, len(self.object_body_ids)))
+        num_cubes = self._episode_num_objects
         placed_xy: List[np.ndarray] = []
 
         for i, body_id in enumerate(self.object_body_ids):
@@ -597,6 +662,11 @@ class TentaclePickPlaceEnv(gym.Env):
         self.place_success = False
         self.obs_buffer.clear()
 
+        # Resolve this episode's object count (curriculum) + reset metric flags.
+        self._episode_num_objects = self._current_num_objects()
+        self._episode_collision = False
+        self._episode_occluded = False
+
         # Deactivate all grasp constraints
         self._deactivate_all_grasps()
 
@@ -611,7 +681,7 @@ class TentaclePickPlaceEnv(gym.Env):
             )
 
         # Select object to pick (only from the spawned-on-desk subset)
-        num_on_desk = max(1, min(self.num_spawned_objects, len(self.object_body_ids)))
+        num_on_desk = self._episode_num_objects
         if task and task.active_object_index is not None:
             self.active_object_idx = int(
                 np.clip(task.active_object_index, 0, num_on_desk - 1)
@@ -668,6 +738,9 @@ class TentaclePickPlaceEnv(gym.Env):
         self.previous_object_position = self._get_object_position(
             self.active_object_idx
         ).copy()
+
+        # Target-clutter / occlusion proxy for this episode's spawn layout.
+        self._episode_occluded = self._compute_occlusion()
 
         # Fill observation buffer
         raw_obs = self._get_current_raw_obs()
@@ -800,6 +873,8 @@ class TentaclePickPlaceEnv(gym.Env):
         contact_force = self._tip_object_contact_force(self.active_object_idx)
         self._last_tip_object_contact_force = contact_force
         has_tip_object_contact = contact_force >= self.grasp_contact_force_threshold
+        collision = self._compute_collision()
+        self._episode_collision = self._episode_collision or collision
         within_grasp_proximity = tip_to_obj <= self.grasp_distance_threshold
         grasp_signal = has_tip_object_contact or within_grasp_proximity
         lift_height = max(0.0, float(obj_pos[2] - self.object_rest_z[self.active_object_idx]))
@@ -906,6 +981,11 @@ class TentaclePickPlaceEnv(gym.Env):
         info["is_grasped"] = self.is_grasped
         info["was_dropped"] = was_dropped
         info["place_success"] = self.place_success
+        # Multi-object curriculum metrics
+        info["num_objects"] = self._episode_num_objects
+        info["collision"] = collision
+        info["episode_collision"] = self._episode_collision
+        info["occluded"] = self._episode_occluded
         info["curriculum_phase"] = phase
         info["active_object_idx"] = self.active_object_idx
         info["tip_position"] = tip_pos.copy()

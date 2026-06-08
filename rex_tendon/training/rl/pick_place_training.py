@@ -2,7 +2,7 @@
 
 import logging
 import multiprocessing as mp
-from collections import deque
+from collections import deque, defaultdict
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -134,6 +134,134 @@ class SaveVecNormalizeCallback(BaseCallback):
             env.save(str(self.save_path / filename))
 
 
+class MultiObjectCurriculumCallback(BaseCallback):
+    """Ramp the spawned-object count as the policy masters each level, and log the
+    per-object-count metrics that form the generalization curve.
+
+    Promotion is adaptive: when the rolling place-success rate at the current
+    object count exceeds ``promote_threshold`` (over a full window, after a
+    minimum number of episodes at the level), the shared object counter is bumped
+    and a per-stage best checkpoint is saved. The final checkpoint at the end of
+    training is the multi-object policy.
+
+    TensorBoard tags (under the run's logdir, e.g. rex_results/pick_place_multi/):
+      curriculum/place_success_rate/{n}obj
+      curriculum/grasp_success_rate/{n}obj
+      curriculum/episode_length/{n}obj
+      curriculum/collision_rate, curriculum/occlusion_rate, curriculum/num_objects
+    """
+
+    def __init__(
+        self,
+        curriculum_state,
+        min_objects: int,
+        max_objects: int,
+        model_dir: Path,
+        promote_threshold: float = 0.90,
+        window: int = 100,
+        min_episodes_at_level: int = 300,
+        verbose: int = 0,
+    ):
+        super().__init__(verbose)
+        self.state = curriculum_state
+        self.min_objects = int(min_objects)
+        self.max_objects = int(max_objects)
+        self.model_dir = Path(model_dir)
+        self.promote_threshold = float(promote_threshold)
+        self.window = int(window)
+        self.min_episodes_at_level = int(min_episodes_at_level)
+        self.place = defaultdict(lambda: deque(maxlen=self.window))
+        self.grasp = defaultdict(lambda: deque(maxlen=self.window))
+        self.eplen = defaultdict(lambda: deque(maxlen=self.window))
+        self.collision = deque(maxlen=self.window * 4)
+        self.occluded = deque(maxlen=self.window * 4)
+        self.total_episodes = 0
+        self.episodes_at_level = 0
+
+    def _level(self) -> int:
+        s = self.state
+        return int(s.value) if hasattr(s, "value") else int(s[0])
+
+    def _set_level(self, n: int) -> None:
+        if hasattr(self.state, "value"):
+            self.state.value = int(n)
+        else:
+            self.state[0] = int(n)
+
+    def _on_step(self) -> bool:
+        for info in self.locals.get("infos", []):
+            if "episode" not in info:
+                continue
+            self.total_episodes += 1
+            self.episodes_at_level += 1
+            n = int(info.get("num_objects", self.min_objects))
+            placed = bool(info.get("place_success", False))
+            self.place[n].append(1.0 if placed else 0.0)
+            self.grasp[n].append(
+                1.0 if (placed or info.get("is_grasped", False)) else 0.0
+            )
+            self.eplen[n].append(float(info["episode"].get("l", 0)))
+            self.collision.append(1.0 if info.get("episode_collision", False) else 0.0)
+            self.occluded.append(1.0 if info.get("occluded", False) else 0.0)
+
+        if self.num_timesteps % 1000 == 0 and self.total_episodes > 0:
+            self._log_metrics()
+            self._maybe_promote()
+        return True
+
+    def _log_metrics(self) -> None:
+        for n in sorted(self.place):
+            if self.place[n]:
+                self.logger.record(
+                    f"curriculum/place_success_rate/{n}obj",
+                    100.0 * float(np.mean(self.place[n])),
+                )
+                self.logger.record(
+                    f"curriculum/grasp_success_rate/{n}obj",
+                    100.0 * float(np.mean(self.grasp[n])),
+                )
+                self.logger.record(
+                    f"curriculum/episode_length/{n}obj",
+                    float(np.mean(self.eplen[n])),
+                )
+        if self.collision:
+            self.logger.record(
+                "curriculum/collision_rate", 100.0 * float(np.mean(self.collision))
+            )
+        if self.occluded:
+            self.logger.record(
+                "curriculum/occlusion_rate", 100.0 * float(np.mean(self.occluded))
+            )
+        self.logger.record("curriculum/num_objects", self._level())
+        self.logger.record("curriculum/episodes_at_level", self.episodes_at_level)
+
+    def _maybe_promote(self) -> None:
+        n = self._level()
+        if n >= self.max_objects:
+            return
+        bucket = self.place[n]
+        ready = (
+            self.episodes_at_level >= self.min_episodes_at_level
+            and len(bucket) >= self.window
+            and float(np.mean(bucket)) >= self.promote_threshold
+        )
+        if not ready:
+            return
+        # Save the per-stage best checkpoint, then promote to the next count.
+        stage_path = self.model_dir / f"stage_{n}obj_best"
+        self.model.save(str(stage_path))
+        vec = self.model.get_vec_normalize_env()
+        if vec is not None:
+            vec.save(str(self.model_dir / f"stage_{n}obj_vecnormalize.pkl"))
+        self._set_level(n + 1)
+        self.episodes_at_level = 0
+        if self.verbose:
+            print(
+                f"[curriculum] mastered {n} objects "
+                f"(place>={self.promote_threshold:.0%}) -> {n + 1}; saved {stage_path}"
+            )
+
+
 def load_pick_place_config(config_path: Optional[str] = None) -> PickPlaceConfig:
     """Load pick-and-place configuration from YAML file."""
     if config_path is None:
@@ -196,6 +324,7 @@ def create_environment(
     n_envs: int,
     eval_env: bool = False,
     global_step_counter: Optional[list] = None,
+    object_curriculum_state=None,
 ):
     """Create training or evaluation environment."""
     task_config = get_active_task(config)
@@ -204,6 +333,7 @@ def create_environment(
         "render_mode": None if not eval_env else config.evaluation.render_mode,
         "global_step_counter": global_step_counter,
         "task_config": task_config,
+        "object_curriculum_state": object_curriculum_state,
     }
 
     if n_envs == 1 or eval_env:
@@ -355,6 +485,156 @@ def train(
             console.print(f"Final model: {final_path}")
             console.print(f"Logs: {log_dir}")
 
+    except Exception as e:
+        console.print(f"[red]Training failed: {e}[/red]")
+        raise
+    finally:
+        train_env.close()
+        eval_env.close()
+
+
+@app.command(name="train-multi")
+def train_multi(
+    config: Optional[str] = typer.Option(
+        "rex_tendon/configs/pick_place_multi.yaml",
+        "--config",
+        help="Multi-object curriculum config",
+    ),
+    total_timesteps: Optional[int] = typer.Option(None, help="Override total timesteps"),
+    num_envs: Optional[int] = typer.Option(None, help="Override number of environments"),
+    init_model: Optional[str] = typer.Option(
+        None,
+        "--init-model",
+        help="Warm-start from a trained single-object model (.zip); obs is identical",
+    ),
+    verbose: bool = typer.Option(True, help="Enable verbose output"),
+) -> None:
+    """Train a multi-object pick-and-place policy with an adaptive object-count curriculum.
+
+    Ramps spawned objects from min to max (promoting when place-success > 90% at the
+    current count), logs per-object-count metrics for the generalization curve, and
+    saves a best checkpoint per curriculum stage plus a final multi-object model.
+    """
+    pp_config = load_pick_place_config(config)
+    pp_config.env.object_curriculum_enabled = True
+    if total_timesteps is not None:
+        pp_config.training.total_timesteps = total_timesteps
+    if num_envs is not None:
+        pp_config.training.num_envs = num_envs
+
+    results_dir, log_dir, model_dir = setup_directories(pp_config)
+    save_run_config(pp_config, results_dir, config)
+
+    manager = mp.Manager()
+    global_step_counter = manager.Value("i", 0)
+    object_curriculum_state = manager.Value("i", pp_config.env.min_spawned_objects)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    if verbose:
+        console.print("[bold green]Multi-Object Curriculum Training[/bold green]")
+        console.print(
+            f"  Objects: {pp_config.env.min_spawned_objects} -> "
+            f"{pp_config.env.max_spawned_objects} (adaptive, promote at place>=90%)"
+        )
+        console.print(
+            f"  Device: [cyan]{device.upper()}[/cyan]  "
+            f"Envs: {pp_config.training.num_envs}  "
+            f"Steps: {pp_config.training.total_timesteps:,}"
+        )
+        console.print(f"  Results: {results_dir}")
+
+    train_env = create_environment(
+        pp_config,
+        pp_config.training.num_envs,
+        global_step_counter=global_step_counter,
+        object_curriculum_state=object_curriculum_state,
+    )
+    eval_env = create_environment(
+        pp_config,
+        1,
+        eval_env=True,
+        global_step_counter=global_step_counter,
+        object_curriculum_state=object_curriculum_state,
+    )
+    train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+    eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
+    eval_env.training = False
+
+    policy_kwargs = create_policy_kwargs(pp_config)
+    model = PPO(
+        "MlpPolicy",
+        train_env,
+        learning_rate=pp_config.training.learning_rate,
+        n_steps=pp_config.training.n_steps,
+        batch_size=pp_config.training.batch_size,
+        n_epochs=pp_config.training.n_epochs,
+        gamma=pp_config.training.gamma,
+        gae_lambda=pp_config.training.gae_lambda,
+        clip_range=pp_config.training.clip_range,
+        ent_coef=pp_config.training.ent_coef,
+        policy_kwargs=policy_kwargs,
+        verbose=1 if verbose else 0,
+        tensorboard_log=str(log_dir),
+        device=device,
+    )
+
+    if init_model:
+        try:
+            model.set_parameters(init_model, exact_match=True)
+            if verbose:
+                console.print(f"[dim]Warm-started policy from {init_model}[/dim]")
+        except Exception as exc:  # noqa: BLE001 - fall back gracefully
+            console.print(
+                f"[yellow]Warm-start failed ({exc}); training from scratch.[/yellow]"
+            )
+
+    save_freq = max(1, pp_config.training.save_freq // pp_config.training.num_envs)
+    eval_freq = max(1, pp_config.training.eval_freq // pp_config.training.num_envs)
+    callbacks = [
+        CheckpointCallback(
+            save_freq=save_freq,
+            save_path=str(model_dir),
+            name_prefix="pick_place_multi",
+        ),
+        EvalCallback(
+            eval_env,
+            best_model_save_path=str(model_dir / "best_model"),
+            log_path=str(log_dir),
+            eval_freq=eval_freq,
+            n_eval_episodes=pp_config.training.n_eval_episodes,
+            deterministic=True,
+            render=False,
+        ),
+        PickPlaceMetricsCallback(verbose=1 if verbose else 0),
+        MultiObjectCurriculumCallback(
+            object_curriculum_state,
+            pp_config.env.min_spawned_objects,
+            pp_config.env.max_spawned_objects,
+            model_dir,
+            verbose=1 if verbose else 0,
+        ),
+        SaveVecNormalizeCallback(
+            model_dir, save_freq=save_freq, verbose=1 if verbose else 0
+        ),
+    ]
+
+    if verbose:
+        console.print("[bold]Starting multi-object curriculum training...[/bold]")
+    try:
+        model.learn(
+            total_timesteps=pp_config.training.total_timesteps,
+            callback=callbacks,
+            tb_log_name="PPO_PickPlace_Multi",
+        )
+        final_path = model_dir / "final_model"
+        model.save(str(final_path))
+        vec = model.get_vec_normalize_env()
+        if vec is not None:
+            vec.save(str(model_dir / "vecnormalize_final.pkl"))
+        if verbose:
+            console.print("[bold green]Multi-object training complete![/bold green]")
+            console.print(f"Final (multi-object) model: {final_path}")
+            console.print(f"Per-stage checkpoints + logs: {model_dir}")
     except Exception as e:
         console.print(f"[red]Training failed: {e}[/red]")
         raise

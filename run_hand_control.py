@@ -23,9 +23,10 @@ def main():
         description="Direction-based hand control for the Rex Tendon robot simulation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Hand Control Scheme:
-  Wrist position (L/R)             - Move robot tip left / right
-  Wrist position (U/D)             - Move robot tip up / down
+Hand Control Scheme (decoupled channels):
+  Wrist position (L/R)             - Bend robot tip left / right
+  Wrist position (U/D)             - Bend robot tip up / down
+  Twist / roll hand                - Rotate the base (yaw) — true twist DOF
   Hand depth (closer/farther)      - Z extension: closer=extend, farther=retract
   Flat open palm                   - Return robot to neutral position
   Pinch THUMB + INDEX (hold)       - LOCK grasp on nearest object
@@ -97,8 +98,9 @@ Modes:
     print(f"  Smoothing: {args.smoothing}")
     print("=" * 60)
     print("  Hand Controls:")
-    print("    Wrist left/right       -> Robot L/R movement")
-    print("    Wrist up/down          -> Robot U/D movement")
+    print("    Wrist left/right       -> Bend tip L/R")
+    print("    Wrist up/down          -> Bend tip U/D")
+    print("    Twist / roll hand      -> Rotate base (yaw)")
     print("    Hand depth             -> Z extension (closer=extend)")
     print("    Flat open palm         -> Return to neutral position")
     print("    Pinch THUMB+INDEX      -> LOCK grasp (hold briefly)")

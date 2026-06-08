@@ -1,9 +1,12 @@
 """Real-time webcam hand control for the MuJoCo tentacle simulation.
 
-Control Scheme
---------------
-  Wrist horizontal position (L/R)   : Move robot tip Left / Right
-  Wrist vertical position (U/D)     : Move robot tip Up / Down
+Control Scheme (decoupled channels)
+-----------------------------------
+  Wrist horizontal position (L/R)   : Bend robot tip Left / Right
+  Wrist vertical position (U/D)     : Bend robot tip Up / Down
+  Twist / roll the hand             : Rotate the base (yaw) — true twist DOF,
+                                      active only when the model has a base-yaw
+                                      actuator; smooth/slow by design.
   Hand depth (bbox size in frame)   : Z extension — closer=extend, farther=retract
   Flat open palm (low z_variance)   : Return robot to neutral position
   Pinch THUMB + INDEX (hold ~6 fr)  : LOCK grasp on nearest object
@@ -58,15 +61,23 @@ FLAT_OPEN_CURL_MIN = 0.42
 FLAT_PALM_FRAMES = 4
 
 # ── Cursor mapping ────────────────────────────────────────────────────────────
-# Absolute-position mode: frame [0,1] → workspace [-1,1].  No calibration needed
-# for direction; 'C' only sets the Z (depth) baseline.
-DEAD_ZONE = 0.015
-POS_GAIN = 2.15
+# Absolute wrist-position mode: the wrist's location in the (mirrored) frame maps
+# directly to the tip cursor, so moving your hand moves the robot.  'C' recenters
+# the neutral hand position and sets the Z (depth) baseline.
+DEAD_ZONE = 0.03  # normalized frame units around neutral that map to "no motion"
+POS_GAIN = 3.2  # how far the tip swings per unit of wrist travel across the frame
 DEPTH_GAIN = 4.0
+# Hand-roll → base-yaw (true twist). When the model has a base-yaw actuator,
+# rolling/twisting the hand rotates the whole tentacle about the vertical axis.
+# This is decoupled from position control (which drives the bend), so the two
+# are independent and easy to steer.
+YAW_GAIN = 2.4  # base-yaw radians per radian of hand roll (clamped to joint range)
+YAW_SMOOTH = 0.25  # low-pass alpha for the yaw target (stability)
+DEAD_ROLL = 0.06  # hand-roll dead-zone (radians)
 
 # ── Motion safety ─────────────────────────────────────────────────────────────
-MAX_TENDON_DEV = 0.070
-MAX_CTRL_STEP = 0.020
+MAX_TENDON_DEV = 0.070  # max tendon offset from baseline (caps bend amount)
+MAX_CTRL_STEP = 0.030  # max tendon change per frame (raise for snappier tracking)
 
 # ── Work envelope ─────────────────────────────────────────────────────────────
 TABLE_X_MAX = 0.21
@@ -295,43 +306,42 @@ def _extract_features(hand_lm, frame_shape):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _map_cursor(features: dict, bbox_center: float, neutral_xy: np.ndarray) -> tuple:
-    """Convert target_yaw / target_pitch to robot cursor + depth baseline.
+def _wrap_angle(angle: float) -> float:
+    """Wrap an angle to (-pi, pi]."""
+    return (angle + np.pi) % (2.0 * np.pi) - np.pi
 
-    Mapping (all absolute, no calibration needed):
-      target_yaw  →  cursor_x in [-1, +1]
-      target_pitch  →  cursor_y in [+1, -1]  (inverted: up=+)
 
-    Roll-angle rotation is intentionally DISABLED — it caused the whole
-    control axis to rotate when the user tilted their hand, making direction
-    fight intuition.
+def _map_cursor(
+    features: dict, bbox_center: float, neutral_xy: np.ndarray
+) -> tuple:
+    """Convert the wrist's frame position to a robot cursor + depth baseline.
+
+    Pure position control, decoupled from twist (which drives the base yaw):
+      wrist_x (0=left, 1=right; frame is mirrored)  →  cursor_x in [-1, +1]
+      wrist_y (0=top,  1=bottom)                    →  cursor_y in [+1, -1]  (up=+)
+
+    'neutral_xy' is the calibrated hand centre ('C' key; default frame centre).
 
     Returns:
         cursor   : np.ndarray [x, y] in [-1, 1]
         baseline : float tendon length in [ACTUATOR_LO, ACTUATOR_HI]
     """
-    # Map movement relative to calibrated neutral hand orientation.
-    raw_x = (features["target_yaw"] - neutral_xy[0]) * 2.0  # + = right
-
-    # Map target_pitch to Y-axis (screen Y inverted).
-    raw_y = -(features["target_pitch"] - neutral_xy[1]) * 2.0  # + = up
-
-    magnitude = np.sqrt(raw_x**2 + raw_y**2)
-    if magnitude < DEAD_ZONE:
+    dx = float(features["wrist_x"]) - float(neutral_xy[0])  # + = hand moved right
+    dy = -(float(features["wrist_y"]) - float(neutral_xy[1]))  # + = hand moved up
+    dist = float(np.hypot(dx, dy))
+    if dist < DEAD_ZONE:
         cursor = np.zeros(2, dtype=np.float32)
     else:
-        # Smooth ramp from dead-zone edge; preserve direction
-        effective = (magnitude - DEAD_ZONE) / max(1.0 - DEAD_ZONE, 1e-6)
-        scaled = min(effective * POS_GAIN, 1.0)  # soft cap at 1.0
-        cursor = np.array(
-            [raw_x / magnitude * scaled, raw_y / magnitude * scaled],
-            dtype=np.float32,
-        )
+        cx = dx * POS_GAIN
+        cy = dy * POS_GAIN
+        mag = float(np.hypot(cx, cy))
+        if mag > 1.0:
+            cx, cy = cx / mag, cy / mag
+        cursor = np.array([cx, cy], dtype=np.float32)
 
     # Depth: bbox_area change from calibrated baseline.
     t = np.clip(0.5 + (features["bbox_area"] - bbox_center) * DEPTH_GAIN, 0.0, 1.0)
     baseline = float(ACTUATOR_LO + t * (ACTUATOR_HI - ACTUATOR_LO))
-
     return cursor, baseline
 
 
@@ -469,8 +479,17 @@ class HandSimController:
             self.mj_model, width=PIP_W * 2, height=PIP_H * 2
         )
 
-        self.act_low = self.mj_model.actuator_ctrlrange[:, 0]
-        self.act_high = self.mj_model.actuator_ctrlrange[:, 1]
+        # Tendon actuators are the first 3. An optional 4th actuator is the
+        # base yaw (true twist); the controller adapts to its presence.
+        self.act_low = self.mj_model.actuator_ctrlrange[:3, 0]
+        self.act_high = self.mj_model.actuator_ctrlrange[:3, 1]
+        self._has_yaw = int(self.mj_model.nu) >= 4
+        if self._has_yaw:
+            self._yaw_lo = float(self.mj_model.actuator_ctrlrange[3, 0])
+            self._yaw_hi = float(self.mj_model.actuator_ctrlrange[3, 1])
+        else:
+            self._yaw_lo, self._yaw_hi = -1.5708, 1.5708
+        self._smoothed_yaw = 0.0
 
         # Control state
         self.current_ctrl = np.full(3, NEUTRAL_LEN, dtype=np.float32)
@@ -478,7 +497,7 @@ class HandSimController:
         self._prev_ctrl = self.current_ctrl.copy()  # for rate limiting
         self.smoothed_cursor = np.zeros(2, dtype=np.float32)
         self.smoothed_baseline = NEUTRAL_LEN
-        self.mj_data.ctrl[:] = self.current_ctrl
+        self._write_ctrl()
 
         self.grasp_locked = False
         self.grasped_bid = -1
@@ -490,6 +509,7 @@ class HandSimController:
         # Depth calibration only (wrist position does not need calibration)
         self._bbox_center = 0.05  # updated on 'C'
         self._neutral_xy = np.array([0.5, 0.5], dtype=np.float32)
+        self._neutral_roll: Optional[float] = None  # captured on first hand / 'C'
 
         # Site / object IDs
         self.tip_site_id = mujoco.mj_name2id(
@@ -532,6 +552,12 @@ class HandSimController:
 
         self.camera_id = camera_id
         mujoco.mj_forward(self.mj_model, self.mj_data)
+
+    def _write_ctrl(self) -> None:
+        """Write tendon ctrl (and base-yaw ctrl if the model has that DOF)."""
+        self.mj_data.ctrl[:3] = self.current_ctrl
+        if self._has_yaw:
+            self.mj_data.ctrl[3] = self._smoothed_yaw
 
     # ── Grasp helpers ──────────────────────────────────────────────────────────
 
@@ -677,6 +703,11 @@ class HandSimController:
                     curl = features["avg_curl"]
                     zvar = features["z_variance"]
 
+                    # Capture the neutral hand-roll once so twist is measured
+                    # relative to however the hand is first held.
+                    if self._neutral_roll is None:
+                        self._neutral_roll = float(features["roll_angle"])
+
                     # 1. Flat-palm override → go neutral
                     if zvar < FLAT_ZVAR and curl > FLAT_OPEN_CURL_MIN:
                         self._flat_counter += 1
@@ -724,10 +755,27 @@ class HandSimController:
                                 self._fist_counter = 0
 
                         # 4. Continuous motion — "Move like water"
-                        # Always mirror hand, but with heavy filtering for fluid wave motion
+                        # Position drives the bend; hand-roll drives the base yaw.
                         cursor, baseline = _map_cursor(
                             features, self._bbox_center, self._neutral_xy
                         )
+
+                        # Hand twist → base yaw (decoupled true-twist DOF).
+                        if self._has_yaw and self._neutral_roll is not None:
+                            roll_delta = _wrap_angle(
+                                float(features["roll_angle"]) - self._neutral_roll
+                            )
+                            if abs(roll_delta) < DEAD_ROLL:
+                                roll_delta = 0.0
+                            yaw_target = float(
+                                np.clip(
+                                    -roll_delta * YAW_GAIN, self._yaw_lo, self._yaw_hi
+                                )
+                            )
+                            self._smoothed_yaw = (
+                                YAW_SMOOTH * yaw_target
+                                + (1.0 - YAW_SMOOTH) * self._smoothed_yaw
+                            )
 
                         # High alpha means "follow me now"; the tendon rate limiter
                         # provides the remaining physical smoothing.
@@ -796,7 +844,7 @@ class HandSimController:
                     status_msg = "No hand detected — holding state"
 
                 # ── Physics step ───────────────────────────────────────────────
-                self.mj_data.ctrl[:] = self.current_ctrl
+                self._write_ctrl()
 
                 # Pre-compute anti-gravity force for grasped object once.
                 # xfrc_applied[bid] = [fx, fy, fz, tx, ty, tz] in world frame.
@@ -928,13 +976,14 @@ class HandSimController:
                     self._unlock_grasp()
                     status_msg = "SPACE → RELEASED 🔓"
                 elif key == ord("c"):
-                    # Calibrate neutral hand pose and depth baseline.
+                    # Calibrate neutral hand position and depth baseline.
                     if features is not None:
                         self._bbox_center = features["bbox_area"]
                         self._neutral_xy = np.array(
-                            [features["target_yaw"], features["target_pitch"]],
+                            [features["wrist_x"], features["wrist_y"]],
                             dtype=np.float32,
                         )
+                        self._neutral_roll = float(features["roll_angle"])
                     self.smoothed_cursor = np.zeros(2, dtype=np.float32)
                     self.smoothed_baseline = NEUTRAL_LEN
                     status_msg = "Neutral hand pose calibrated"
@@ -943,7 +992,8 @@ class HandSimController:
                     self.current_ctrl = np.full(3, NEUTRAL_LEN, dtype=np.float32)
                     self._last_valid_ctrl = self.current_ctrl.copy()
                     self._prev_ctrl = self.current_ctrl.copy()
-                    self.mj_data.ctrl[:] = self.current_ctrl
+                    self._smoothed_yaw = 0.0
+                    self._write_ctrl()
                     self.grasp_locked = False
                     self.grasped_bid = -1
                     self._fist_counter = 0

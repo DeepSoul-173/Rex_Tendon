@@ -99,6 +99,11 @@ class PickPlaceEnvConfig(BaseConfig):
     drop_penalty: float = Field(
         default=3.0, description="Penalty for dropping object"
     )
+    time_penalty: float = Field(
+        default=0.0,
+        description="Per-step living cost; encourages finishing (placing) promptly "
+        "rather than hovering to farm shaping rewards",
+    )
     action_change_penalty_scale: float = Field(
         default=0.1, description="Scale for action change penalty"
     )

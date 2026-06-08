@@ -18,13 +18,16 @@ pick_place:
     reach_only_steps: 0
     reach_grasp_steps: 80000
 
-    # Dense shaping so the full reach->grasp->carry->place chain has a gradient.
+    # Dense shaping. Lifting is NOT rewarded per-step: that farmed (holding the
+    # cube high for 150 steps beat placing). Instead, potential-based progress to
+    # the zone + a big place bonus + a small living cost make FINISHING dominate.
     reach_reward_scale: 1.0
     grasp_bonus: 5.0
-    object_progress_reward_scale: 1.5
-    transport_reward_scale: 2.0
-    place_bonus: 15.0
+    object_progress_reward_scale: 3.0
+    transport_reward_scale: 0.0
+    place_bonus: 25.0
     drop_penalty: 3.0
+    time_penalty: 0.05
 
     # Keep sim2real regularisers on, but light.
     randomize_dynamics: true

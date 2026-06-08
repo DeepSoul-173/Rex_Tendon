@@ -130,6 +130,7 @@ class TentaclePickPlaceEnv(gym.Env):
         self.transport_reward_scale = self.config.transport_reward_scale
         self.place_bonus = self.config.place_bonus
         self.drop_penalty = self.config.drop_penalty
+        self.time_penalty = self.config.time_penalty
         self.action_change_penalty_scale = self.config.action_change_penalty_scale
         self.action_jerk_penalty_scale = self.config.action_jerk_penalty_scale
         self.object_progress_reward_scale = self.config.object_progress_reward_scale
@@ -866,6 +867,9 @@ class TentaclePickPlaceEnv(gym.Env):
 
         if self.place_success:
             reward += self.place_bonus
+
+        # Per-step living cost: makes finishing (placing) preferable to hovering.
+        reward -= self.time_penalty
 
         # Action change penalty
         action_change = np.linalg.norm(action - previous_action)

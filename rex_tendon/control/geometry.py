@@ -156,3 +156,47 @@ def convert_2d_cursor_to_target_lengths(
 
     return target_lengths_m
 
+
+def convert_4d_cursor_to_target_lengths(
+    cursor_4d: np.ndarray,
+    baseline_lengths_m: np.ndarray,
+    actuator_low_lengths_m: np.ndarray,
+    actuator_high_lengths_m: np.ndarray,
+    max_2d_action_magnitude: float = 1.0,
+) -> np.ndarray:
+    """Convert a 4-D action into six tendon lengths for a 2-section arm.
+
+    The action is two stacked 2-D cursors, ``[s1_x, s1_y, s2_x, s2_y]``: the first
+    drives the lower section (tendons 1-3), the second the upper section (tendons
+    4-6).  Each section reuses the single-section 2-D cursor -> 3-tendon map, so
+    the two halves bend independently (4 task-DOF, enabling S-curves).
+
+    Args:
+        cursor_4d: ``[s1_x, s1_y, s2_x, s2_y]`` in ``[-max, max]``.
+        baseline_lengths_m: (6,) baseline tendon lengths (3 per section).
+        actuator_low_lengths_m / actuator_high_lengths_m: (6,) per-tendon bounds.
+        max_2d_action_magnitude: max magnitude of each 2-D cursor.
+
+    Returns:
+        (6,) numpy array of target tendon lengths in metres.
+    """
+    cursor_4d = np.asarray(cursor_4d, dtype=np.float32).reshape(-1)
+    baseline_lengths_m = np.asarray(baseline_lengths_m, dtype=np.float32)
+    actuator_low_lengths_m = np.asarray(actuator_low_lengths_m, dtype=np.float32)
+    actuator_high_lengths_m = np.asarray(actuator_high_lengths_m, dtype=np.float32)
+
+    section_lengths = []
+    for s in range(2):
+        cursor = cursor_4d[2 * s : 2 * s + 2]
+        lo, hi = 3 * s, 3 * s + 3
+        section_lengths.append(
+            convert_2d_cursor_to_target_lengths(
+                cursor,
+                baseline_lengths_m[lo:hi],
+                actuator_low_lengths_m[lo:hi],
+                actuator_high_lengths_m[lo:hi],
+                max_2d_action_magnitude,
+            )
+        )
+    return np.concatenate(section_lengths).astype(np.float32)
+

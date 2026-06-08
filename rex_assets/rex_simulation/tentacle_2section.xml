@@ -1,0 +1,419 @@
+<?xml version="1.0" ?>
+<mujoco model="tentacle">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.005" iterations="50"/>
+  <default>
+    <joint stiffness="0.0" damping="0.0" range="0 0.9"/>
+    <geom type="mesh" xyaxes="0 0 -1 -1 0 0" contype="0" conaffinity="0" margin="0.001" solref="0.01 1" solimp="0.9 0.95 0.001"/>
+  </default>
+  <asset>
+    <mesh name="mesh1" file="mujoco_rex_assets/Part1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh2" file="mujoco_rex_assets/Part2.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh3" file="mujoco_rex_assets/Part3.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh4" file="mujoco_rex_assets/Part4.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh5" file="mujoco_rex_assets/Part5.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh6" file="mujoco_rex_assets/Part6.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh7" file="mujoco_rex_assets/Part7.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh8" file="mujoco_rex_assets/Part8.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh9" file="mujoco_rex_assets/Part9.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh10" file="mujoco_rex_assets/Part10.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh11" file="mujoco_rex_assets/Part11.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh12" file="mujoco_rex_assets/Part12.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh13" file="mujoco_rex_assets/Part13.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh14" file="mujoco_rex_assets/Part14.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh15" file="mujoco_rex_assets/Part15.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh16" file="mujoco_rex_assets/Part16.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh17" file="mujoco_rex_assets/Part17.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh18" file="mujoco_rex_assets/Part18.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh19" file="mujoco_rex_assets/Part19.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh20" file="mujoco_rex_assets/Part20.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="mesh21" file="mujoco_rex_assets/Part21.stl" scale="0.001 0.001 0.001"/>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+  </asset>
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="150" elevation="-20"/>
+  </visual>
+  <worldbody>
+    <light pos="0 0 3" dir="0 0 -1" directional="false"/>
+    <geom name="floor" pos="0 0 -0.2" size="0 0 .125" type="plane" material="groundplane" conaffinity="0" condim="3" xyaxes="1 0 0 0 1 0"/>
+    <camera name="fixed_overview" mode="fixed" pos="0 -0.5 0.7" quat="0.924 0.383 0 0" fovy="60"/>
+    <camera name="tracking_cam" mode="fixed" pos="0.3 -0.3 0.4" quat="0.854 0.354 0.146 0.354" fovy="75"/>
+    <site name="target" type="sphere" size="0.01 0.01 0.01" rgba="1 0 0 0.8" pos="0 0 0"/>
+    <body name="body1" pos="0 0 0">
+      <geom name="geom1" type="mesh" mesh="mesh1" contype="0" conaffinity="0"/>
+      <body name="body2" pos="0 0 0">
+        <geom name="geom2" type="mesh" mesh="mesh2" contype="0" conaffinity="0"/>
+        <joint type="ball" name="joint1" pos="0 0 0.0143255" stiffness="0.14107" damping="0.0098749"/>
+        <body name="body3" pos="0 0 0">
+          <geom name="geom3" type="mesh" mesh="mesh3" contype="0" conaffinity="0"/>
+          <joint type="ball" name="joint2" pos="0 0 0.034275" stiffness="0.12269" damping="0.0085881"/>
+          <body name="body4" pos="0 0 0">
+            <geom name="geom4" type="mesh" mesh="mesh4" contype="0" conaffinity="0"/>
+            <joint type="ball" name="joint3" pos="0 0 0.052814" stiffness="0.1067" damping="0.007469"/>
+            <body name="body5" pos="0 0 0">
+              <geom name="geom5" type="mesh" mesh="mesh5" contype="0" conaffinity="0"/>
+              <joint type="ball" name="joint4" pos="0 0 0.0700425" stiffness="0.092797" damping="0.0064958"/>
+              <body name="body6" pos="0 0 0">
+                <geom name="geom6" type="mesh" mesh="mesh6" contype="0" conaffinity="0"/>
+                <joint type="ball" name="joint5" pos="0 0 0.0860535" stiffness="0.080705" damping="0.0056493"/>
+                <body name="body7" pos="0 0 0">
+                  <geom name="geom7" type="mesh" mesh="mesh7" contype="0" conaffinity="0"/>
+                  <joint type="ball" name="joint6" pos="0 0 0.1009325" stiffness="0.070188" damping="0.0049132"/>
+                  <body name="body8" pos="0 0 0">
+                    <geom name="geom8" type="mesh" mesh="mesh8" contype="0" conaffinity="0"/>
+                    <joint type="ball" name="joint7" pos="0 0 0.11476" stiffness="0.061042" damping="0.004273"/>
+                    <body name="body9" pos="0 0 0">
+                      <geom name="geom9" type="mesh" mesh="mesh9" contype="0" conaffinity="0"/>
+                      <joint type="ball" name="joint8" pos="0 0 0.12761" stiffness="0.053088" damping="0.0037162"/>
+                      <body name="body10" pos="0 0 0">
+                        <geom name="geom10" type="mesh" mesh="mesh10" contype="0" conaffinity="0"/>
+                        <joint type="ball" name="joint9" pos="0 0 0.13955" stiffness="0.04617" damping="0.0032319"/>
+                        <body name="body11" pos="0 0 0">
+                          <geom name="geom11" type="mesh" mesh="mesh11" contype="0" conaffinity="0"/>
+                          <joint type="ball" name="joint10" pos="0 0 0.150649" stiffness="0.040154" damping="0.0028108"/>
+                          <body name="body12" pos="0 0 0">
+                            <geom name="geom12" type="mesh" mesh="mesh12" contype="0" conaffinity="0"/>
+                            <joint type="ball" name="joint11" pos="0 0 0.160962" stiffness="0.034922" damping="0.0024445"/>
+                            <body name="body13" pos="0 0 0">
+                              <geom name="geom13" type="mesh" mesh="mesh13" contype="0" conaffinity="0"/>
+                              <joint type="ball" name="joint12" pos="0 0 0.17055" stiffness="0.030371" damping="0.002126"/>
+                              <body name="body14" pos="0 0 0">
+                                <geom name="geom14" type="mesh" mesh="mesh14" contype="0" conaffinity="0"/>
+                                <joint type="ball" name="joint13" pos="0 0 0.179453" stiffness="0.026414" damping="0.001849"/>
+                                <body name="body15" pos="0 0 0">
+                                  <geom name="geom15" type="mesh" mesh="mesh15" contype="0" conaffinity="0"/>
+                                  <joint type="ball" name="joint14" pos="0 0 0.18773" stiffness="0.022972" damping="0.001608"/>
+                                  <body name="body16" pos="0 0 0">
+                                    <geom name="geom16" type="mesh" mesh="mesh16" contype="0" conaffinity="0"/>
+                                    <joint type="ball" name="joint15" pos="0 0 0.19542" stiffness="0.019978" damping="0.0013985"/>
+                                    <body name="body17" pos="0 0 0">
+                                      <geom name="geom17" type="mesh" mesh="mesh17" contype="0" conaffinity="0"/>
+                                      <joint type="ball" name="joint16" pos="0 0 0.202571" stiffness="0.017375" damping="0.0012163"/>
+                                      <body name="body18" pos="0 0 0">
+                                        <geom name="geom18" type="mesh" mesh="mesh18" contype="0" conaffinity="0"/>
+                                        <joint type="ball" name="joint17" pos="0 0 0.2092135" stiffness="0.015111" damping="0.0010578"/>
+                                        <body name="body19" pos="0 0 0">
+                                          <geom name="geom19" type="mesh" mesh="mesh19" contype="0" conaffinity="0"/>
+                                          <joint type="ball" name="joint18" pos="0 0 0.2153875" stiffness="0.013142" damping="0.00091994"/>
+                                          <body name="body20" pos="0 0 0">
+                                            <geom name="geom20" type="mesh" mesh="mesh20" contype="0" conaffinity="0"/>
+                                            <joint type="ball" name="joint19" pos="0 0 0.2211245" stiffness="0.01143" damping="0.00080007"/>
+                                            <body name="body21" pos="0 0 0">
+                                              <geom name="geom21" type="mesh" mesh="mesh21" contype="0" conaffinity="0"/>
+                                              <joint type="ball" name="joint20" pos="0 0 0.2264565" stiffness="0.0099402" damping="0.00069581"/>
+                                              <site name="site_in_20_0" pos="0.00125 0.00216 0.22796" size="0.001" rgba="1 1 0 1"/>
+                                              <site name="site_out_20_0" pos="0.00117 0.00204 0.23087" size="0.001" rgba="1 1 0 1"/>
+                                              <site name="site_in_20_1" pos="-0.00250 0.00000 0.22796" size="0.001" rgba="1 1 0 1"/>
+                                              <site name="site_out_20_1" pos="-0.00235 0.00000 0.23087" size="0.001" rgba="1 1 0 1"/>
+                                              <site name="site_in_20_2" pos="0.00125 -0.00216 0.22796" size="0.001" rgba="1 1 0 1"/>
+                                              <site name="site_out_20_2" pos="0.00117 -0.00204 0.23087" size="0.001" rgba="1 1 0 1"/>
+                                              <site name="tip_center" pos="0 0 0.230871" size="0.002" rgba="0 1 0 1"/>
+                                            </body>
+                                            <site name="site_in_19_0" pos="0.00138 0.00239 0.22275" size="0.001" rgba="1 1 0 1"/>
+                                            <site name="site_out_19_0" pos="0.00130 0.00225 0.22588" size="0.001" rgba="1 1 0 1"/>
+                                            <site name="site_in_19_1" pos="-0.00276 0.00000 0.22275" size="0.001" rgba="1 1 0 1"/>
+                                            <site name="site_out_19_1" pos="-0.00260 0.00000 0.22588" size="0.001" rgba="1 1 0 1"/>
+                                            <site name="site_in_19_2" pos="0.00138 -0.00239 0.22275" size="0.001" rgba="1 1 0 1"/>
+                                            <site name="site_out_19_2" pos="0.00130 -0.00225 0.22588" size="0.001" rgba="1 1 0 1"/>
+                                          </body>
+                                          <site name="site_in_18_0" pos="0.00152 0.00264 0.21713" size="0.001" rgba="1 1 0 1"/>
+                                          <site name="site_out_18_0" pos="0.00144 0.00249 0.22050" size="0.001" rgba="1 1 0 1"/>
+                                          <site name="site_in_18_1" pos="-0.00304 0.00000 0.21713" size="0.001" rgba="1 1 0 1"/>
+                                          <site name="site_out_18_1" pos="-0.00287 0.00000 0.22050" size="0.001" rgba="1 1 0 1"/>
+                                          <site name="site_in_18_2" pos="0.00152 -0.00264 0.21713" size="0.001" rgba="1 1 0 1"/>
+                                          <site name="site_out_18_2" pos="0.00144 -0.00249 0.22050" size="0.001" rgba="1 1 0 1"/>
+                                        </body>
+                                        <site name="site_in_17_0" pos="0.00167 0.00290 0.21109" size="0.001" rgba="1 1 0 1"/>
+                                        <site name="site_out_17_0" pos="0.00158 0.00274 0.21472" size="0.001" rgba="1 1 0 1"/>
+                                        <site name="site_in_17_1" pos="-0.00335 0.00000 0.21109" size="0.001" rgba="1 1 0 1"/>
+                                        <site name="site_out_17_1" pos="-0.00316 0.00000 0.21472" size="0.001" rgba="1 1 0 1"/>
+                                        <site name="site_in_17_2" pos="0.00167 -0.00290 0.21109" size="0.001" rgba="1 1 0 1"/>
+                                        <site name="site_out_17_2" pos="0.00158 -0.00274 0.21472" size="0.001" rgba="1 1 0 1"/>
+                                      </body>
+                                      <site name="site_in_16_0" pos="0.00184 0.00318 0.20459" size="0.001" rgba="1 1 0 1"/>
+                                      <site name="site_out_16_0" pos="0.00174 0.00301 0.20849" size="0.001" rgba="1 1 0 1"/>
+                                      <site name="site_in_16_1" pos="-0.00368 0.00000 0.20459" size="0.001" rgba="1 1 0 1"/>
+                                      <site name="site_out_16_1" pos="-0.00348 0.00000 0.20849" size="0.001" rgba="1 1 0 1"/>
+                                      <site name="site_in_16_2" pos="0.00184 -0.00318 0.20459" size="0.001" rgba="1 1 0 1"/>
+                                      <site name="site_out_16_2" pos="0.00174 -0.00301 0.20849" size="0.001" rgba="1 1 0 1"/>
+                                    </body>
+                                    <site name="site_in_15_0" pos="0.00201 0.00349 0.19760" size="0.001" rgba="1 1 0 1"/>
+                                    <site name="site_out_15_0" pos="0.00191 0.00331 0.20179" size="0.001" rgba="1 1 0 1"/>
+                                    <site name="site_in_15_1" pos="-0.00403 0.00000 0.19760" size="0.001" rgba="1 1 0 1"/>
+                                    <site name="site_out_15_1" pos="-0.00382 0.00000 0.20179" size="0.001" rgba="1 1 0 1"/>
+                                    <site name="site_in_15_2" pos="0.00201 -0.00349 0.19760" size="0.001" rgba="1 1 0 1"/>
+                                    <site name="site_out_15_2" pos="0.00191 -0.00331 0.20179" size="0.001" rgba="1 1 0 1"/>
+                                  </body>
+                                  <site name="site_in_14_0" pos="0.00220 0.00382 0.19007" size="0.001" rgba="1 1 0 1"/>
+                                  <site name="site_out_14_0" pos="0.00209 0.00362 0.19459" size="0.001" rgba="1 1 0 1"/>
+                                  <site name="site_in_14_1" pos="-0.00441 0.00000 0.19007" size="0.001" rgba="1 1 0 1"/>
+                                  <site name="site_out_14_1" pos="-0.00418 0.00000 0.19459" size="0.001" rgba="1 1 0 1"/>
+                                  <site name="site_in_14_2" pos="0.00220 -0.00382 0.19007" size="0.001" rgba="1 1 0 1"/>
+                                  <site name="site_out_14_2" pos="0.00209 -0.00362 0.19459" size="0.001" rgba="1 1 0 1"/>
+                                </body>
+                                <site name="site_in_13_0" pos="0.00241 0.00417 0.18198" size="0.001" rgba="1 1 0 1"/>
+                                <site name="site_out_13_0" pos="0.00229 0.00396 0.18684" size="0.001" rgba="1 1 0 1"/>
+                                <site name="site_in_13_1" pos="-0.00482 0.00000 0.18198" size="0.001" rgba="1 1 0 1"/>
+                                <site name="site_out_13_1" pos="-0.00457 0.00000 0.18684" size="0.001" rgba="1 1 0 1"/>
+                                <site name="site_in_13_2" pos="0.00241 -0.00417 0.18198" size="0.001" rgba="1 1 0 1"/>
+                                <site name="site_out_13_2" pos="0.00229 -0.00396 0.18684" size="0.001" rgba="1 1 0 1"/>
+                              </body>
+                              <site name="site_in_12_0" pos="0.00263 0.00455 0.17326" size="0.001" rgba="1 1 0 1"/>
+                              <site name="site_out_12_0" pos="0.00250 0.00432 0.17849" size="0.001" rgba="1 1 0 1"/>
+                              <site name="site_in_12_1" pos="-0.00526 0.00000 0.17326" size="0.001" rgba="1 1 0 1"/>
+                              <site name="site_out_12_1" pos="-0.00499 0.00000 0.17849" size="0.001" rgba="1 1 0 1"/>
+                              <site name="site_in_12_2" pos="0.00263 -0.00455 0.17326" size="0.001" rgba="1 1 0 1"/>
+                              <site name="site_out_12_2" pos="0.00250 -0.00432 0.17849" size="0.001" rgba="1 1 0 1"/>
+                            </body>
+                            <site name="site_in_11_0" pos="0.00286 0.00496 0.16389" size="0.001" rgba="1 1 0 1"/>
+                            <site name="site_out_11_0" pos="0.00272 0.00471 0.16951" size="0.001" rgba="1 1 0 1"/>
+                            <site name="site_in_11_1" pos="-0.00573 0.00000 0.16389" size="0.001" rgba="1 1 0 1"/>
+                            <site name="site_out_11_1" pos="-0.00544 0.00000 0.16951" size="0.001" rgba="1 1 0 1"/>
+                            <site name="site_in_11_2" pos="0.00286 -0.00496 0.16389" size="0.001" rgba="1 1 0 1"/>
+                            <site name="site_out_11_2" pos="0.00272 -0.00471 0.16951" size="0.001" rgba="1 1 0 1"/>
+                          </body>
+                          <site name="site_in_10_0" pos="0.00312 0.00540 0.15379" size="0.001" rgba="1 1 0 1"/>
+                          <site name="site_out_10_0" pos="0.00297 0.00514 0.15985" size="0.001" rgba="1 1 0 1"/>
+                          <site name="site_in_10_1" pos="-0.00624 0.00000 0.15379" size="0.001" rgba="1 1 0 1"/>
+                          <site name="site_out_10_1" pos="-0.00593 0.00000 0.15985" size="0.001" rgba="1 1 0 1"/>
+                          <site name="site_in_10_2" pos="0.00312 -0.00540 0.15379" size="0.001" rgba="1 1 0 1"/>
+                          <site name="site_out_10_2" pos="0.00297 -0.00514 0.15985" size="0.001" rgba="1 1 0 1"/>
+                        </body>
+                        <site name="site_in_9_0" pos="0.00339 0.00588 0.14294" size="0.001" rgba="1 1 0 1"/>
+                        <site name="site_out_9_0" pos="0.00323 0.00559 0.14945" size="0.001" rgba="1 1 0 1"/>
+                        <site name="site_in_9_1" pos="-0.00678 0.00000 0.14294" size="0.001" rgba="1 1 0 1"/>
+                        <site name="site_out_9_1" pos="-0.00646 0.00000 0.14945" size="0.001" rgba="1 1 0 1"/>
+                        <site name="site_in_9_2" pos="0.00339 -0.00588 0.14294" size="0.001" rgba="1 1 0 1"/>
+                        <site name="site_out_9_2" pos="0.00323 -0.00559 0.14945" size="0.001" rgba="1 1 0 1"/>
+                      </body>
+                      <site name="site_in_8_0" pos="0.00369 0.00639 0.13125" size="0.001" rgba="1 1 0 1"/>
+                      <site name="site_out_8_0" pos="0.00351 0.00608 0.13826" size="0.001" rgba="1 1 0 1"/>
+                      <site name="site_in_8_1" pos="-0.00737 0.00000 0.13125" size="0.001" rgba="1 1 0 1"/>
+                      <site name="site_out_8_1" pos="-0.00702 0.00000 0.13826" size="0.001" rgba="1 1 0 1"/>
+                      <site name="site_in_8_2" pos="0.00369 -0.00639 0.13125" size="0.001" rgba="1 1 0 1"/>
+                      <site name="site_out_8_2" pos="0.00351 -0.00608 0.13826" size="0.001" rgba="1 1 0 1"/>
+                    </body>
+                    <site name="site_in_7_0" pos="0.00400 0.00693 0.11868" size="0.001" rgba="1 1 0 1"/>
+                    <site name="site_out_7_0" pos="0.00381 0.00661 0.12622" size="0.001" rgba="1 1 0 1"/>
+                    <site name="site_in_7_1" pos="-0.00801 0.00000 0.11868" size="0.001" rgba="1 1 0 1"/>
+                    <site name="site_out_7_1" pos="-0.00763 0.00000 0.12622" size="0.001" rgba="1 1 0 1"/>
+                    <site name="site_in_7_2" pos="0.00400 -0.00693 0.11868" size="0.001" rgba="1 1 0 1"/>
+                    <site name="site_out_7_2" pos="0.00381 -0.00661 0.12622" size="0.001" rgba="1 1 0 1"/>
+                  </body>
+                  <site name="site_in_6_0" pos="0.00434 0.00753 0.10515" size="0.001" rgba="1 1 0 1"/>
+                  <site name="site_out_6_0" pos="0.00414 0.00717 0.11327" size="0.001" rgba="1 1 0 1"/>
+                  <site name="site_in_6_1" pos="-0.00869 0.00000 0.10515" size="0.001" rgba="1 1 0 1"/>
+                  <site name="site_out_6_1" pos="-0.00828 0.00000 0.11327" size="0.001" rgba="1 1 0 1"/>
+                  <site name="site_in_6_2" pos="0.00434 -0.00753 0.10515" size="0.001" rgba="1 1 0 1"/>
+                  <site name="site_out_6_2" pos="0.00414 -0.00717 0.11327" size="0.001" rgba="1 1 0 1"/>
+                </body>
+                <site name="site_in_5_0" pos="0.00471 0.00816 0.09060" size="0.001" rgba="1 1 0 1"/>
+                <site name="site_out_5_0" pos="0.00449 0.00778 0.09933" size="0.001" rgba="1 1 0 1"/>
+                <site name="site_in_5_1" pos="-0.00942 0.00000 0.09060" size="0.001" rgba="1 1 0 1"/>
+                <site name="site_out_5_1" pos="-0.00898 0.00000 0.09933" size="0.001" rgba="1 1 0 1"/>
+                <site name="site_in_5_2" pos="0.00471 -0.00816 0.09060" size="0.001" rgba="1 1 0 1"/>
+                <site name="site_out_5_2" pos="0.00449 -0.00778 0.09933" size="0.001" rgba="1 1 0 1"/>
+              </body>
+              <site name="site_in_4_0" pos="0.00511 0.00885 0.07493" size="0.001" rgba="1 1 0 1"/>
+              <site name="site_out_4_0" pos="0.00487 0.00843 0.08433" size="0.001" rgba="1 1 0 1"/>
+              <site name="site_in_4_1" pos="-0.01021 0.00000 0.07493" size="0.001" rgba="1 1 0 1"/>
+              <site name="site_out_4_1" pos="-0.00974 0.00000 0.08433" size="0.001" rgba="1 1 0 1"/>
+              <site name="site_in_4_2" pos="0.00511 -0.00885 0.07493" size="0.001" rgba="1 1 0 1"/>
+              <site name="site_out_4_2" pos="0.00487 -0.00843 0.08433" size="0.001" rgba="1 1 0 1"/>
+            </body>
+            <site name="site_in_3_0" pos="0.00553 0.00958 0.05808" size="0.001" rgba="1 1 0 1"/>
+            <site name="site_out_3_0" pos="0.00528 0.00914 0.06819" size="0.001" rgba="1 1 0 1"/>
+            <site name="site_in_3_1" pos="-0.01106 0.00000 0.05808" size="0.001" rgba="1 1 0 1"/>
+            <site name="site_out_3_1" pos="-0.01055 0.00000 0.06819" size="0.001" rgba="1 1 0 1"/>
+            <site name="site_in_3_2" pos="0.00553 -0.00958 0.05808" size="0.001" rgba="1 1 0 1"/>
+            <site name="site_out_3_2" pos="0.00528 -0.00914 0.06819" size="0.001" rgba="1 1 0 1"/>
+          </body>
+          <site name="site_in_2_0" pos="0.00599 0.01037 0.03994" size="0.001" rgba="1 1 0 1"/>
+          <site name="site_out_2_0" pos="0.00571 0.00990 0.05082" size="0.001" rgba="1 1 0 1"/>
+          <site name="site_in_2_1" pos="-0.01198 0.00000 0.03994" size="0.001" rgba="1 1 0 1"/>
+          <site name="site_out_2_1" pos="-0.01143 0.00000 0.05082" size="0.001" rgba="1 1 0 1"/>
+          <site name="site_in_2_2" pos="0.00599 -0.01037 0.03994" size="0.001" rgba="1 1 0 1"/>
+          <site name="site_out_2_2" pos="0.00571 -0.00990 0.05082" size="0.001" rgba="1 1 0 1"/>
+        </body>
+        <site name="site_in_1_0" pos="0.00648 0.01123 0.02042" size="0.001" rgba="1 1 0 1"/>
+        <site name="site_out_1_0" pos="0.00619 0.01071 0.03213" size="0.001" rgba="1 1 0 1"/>
+        <site name="site_in_1_1" pos="-0.01296 0.00000 0.02042" size="0.001" rgba="1 1 0 1"/>
+        <site name="site_out_1_1" pos="-0.01237 0.00000 0.03213" size="0.001" rgba="1 1 0 1"/>
+        <site name="site_in_1_2" pos="0.00648 -0.01123 0.02042" size="0.001" rgba="1 1 0 1"/>
+        <site name="site_out_1_2" pos="0.00619 -0.01071 0.03213" size="0.001" rgba="1 1 0 1"/>
+      </body>
+      <site name="site_in_0_0" pos="0.00687 0.01190 0.00500" size="0.001" rgba="1 1 0 1"/>
+      <site name="site_out_0_0" pos="0.00669 0.01159 0.01202" size="0.001" rgba="1 1 0 1"/>
+      <site name="site_in_0_1" pos="-0.01374 0.00000 0.00500" size="0.001" rgba="1 1 0 1"/>
+      <site name="site_out_0_1" pos="-0.01339 0.00000 0.01202" size="0.001" rgba="1 1 0 1"/>
+      <site name="site_in_0_2" pos="0.00687 -0.01190 0.00500" size="0.001" rgba="1 1 0 1"/>
+      <site name="site_out_0_2" pos="0.00669 -0.01159 0.01202" size="0.001" rgba="1 1 0 1"/>
+    </body>
+  </worldbody>
+  <tendon>
+    <spatial name="tendon_1" width="0.001" rgba="1 0 0 1">
+      <site site="site_in_0_0"/>
+      <site site="site_out_0_0"/>
+      <site site="site_in_1_0"/>
+      <site site="site_out_1_0"/>
+      <site site="site_in_2_0"/>
+      <site site="site_out_2_0"/>
+      <site site="site_in_3_0"/>
+      <site site="site_out_3_0"/>
+      <site site="site_in_4_0"/>
+      <site site="site_out_4_0"/>
+      <site site="site_in_5_0"/>
+      <site site="site_out_5_0"/>
+      <site site="site_in_6_0"/>
+      <site site="site_out_6_0"/>
+      <site site="site_in_7_0"/>
+      <site site="site_out_7_0"/>
+      <site site="site_in_8_0"/>
+      <site site="site_out_8_0"/>
+      <site site="site_in_9_0"/>
+      <site site="site_out_9_0"/>
+      <site site="site_in_10_0"/>
+      <site site="site_out_10_0"/>
+    </spatial>
+    <spatial name="tendon_2" width="0.001" rgba="1 0 0 1">
+      <site site="site_in_0_1"/>
+      <site site="site_out_0_1"/>
+      <site site="site_in_1_1"/>
+      <site site="site_out_1_1"/>
+      <site site="site_in_2_1"/>
+      <site site="site_out_2_1"/>
+      <site site="site_in_3_1"/>
+      <site site="site_out_3_1"/>
+      <site site="site_in_4_1"/>
+      <site site="site_out_4_1"/>
+      <site site="site_in_5_1"/>
+      <site site="site_out_5_1"/>
+      <site site="site_in_6_1"/>
+      <site site="site_out_6_1"/>
+      <site site="site_in_7_1"/>
+      <site site="site_out_7_1"/>
+      <site site="site_in_8_1"/>
+      <site site="site_out_8_1"/>
+      <site site="site_in_9_1"/>
+      <site site="site_out_9_1"/>
+      <site site="site_in_10_1"/>
+      <site site="site_out_10_1"/>
+    </spatial>
+    <spatial name="tendon_3" width="0.001" rgba="1 0 0 1">
+      <site site="site_in_0_2"/>
+      <site site="site_out_0_2"/>
+      <site site="site_in_1_2"/>
+      <site site="site_out_1_2"/>
+      <site site="site_in_2_2"/>
+      <site site="site_out_2_2"/>
+      <site site="site_in_3_2"/>
+      <site site="site_out_3_2"/>
+      <site site="site_in_4_2"/>
+      <site site="site_out_4_2"/>
+      <site site="site_in_5_2"/>
+      <site site="site_out_5_2"/>
+      <site site="site_in_6_2"/>
+      <site site="site_out_6_2"/>
+      <site site="site_in_7_2"/>
+      <site site="site_out_7_2"/>
+      <site site="site_in_8_2"/>
+      <site site="site_out_8_2"/>
+      <site site="site_in_9_2"/>
+      <site site="site_out_9_2"/>
+      <site site="site_in_10_2"/>
+      <site site="site_out_10_2"/>
+    </spatial>
+    <spatial name="tendon_4" width="0.001" rgba="1 0 0 1">
+      <site site="site_in_10_0"/>
+      <site site="site_out_10_0"/>
+      <site site="site_in_11_0"/>
+      <site site="site_out_11_0"/>
+      <site site="site_in_12_0"/>
+      <site site="site_out_12_0"/>
+      <site site="site_in_13_0"/>
+      <site site="site_out_13_0"/>
+      <site site="site_in_14_0"/>
+      <site site="site_out_14_0"/>
+      <site site="site_in_15_0"/>
+      <site site="site_out_15_0"/>
+      <site site="site_in_16_0"/>
+      <site site="site_out_16_0"/>
+      <site site="site_in_17_0"/>
+      <site site="site_out_17_0"/>
+      <site site="site_in_18_0"/>
+      <site site="site_out_18_0"/>
+      <site site="site_in_19_0"/>
+      <site site="site_out_19_0"/>
+      <site site="site_in_20_0"/>
+      <site site="site_out_20_0"/>
+    </spatial>
+    <spatial name="tendon_5" width="0.001" rgba="1 0 0 1">
+      <site site="site_in_10_1"/>
+      <site site="site_out_10_1"/>
+      <site site="site_in_11_1"/>
+      <site site="site_out_11_1"/>
+      <site site="site_in_12_1"/>
+      <site site="site_out_12_1"/>
+      <site site="site_in_13_1"/>
+      <site site="site_out_13_1"/>
+      <site site="site_in_14_1"/>
+      <site site="site_out_14_1"/>
+      <site site="site_in_15_1"/>
+      <site site="site_out_15_1"/>
+      <site site="site_in_16_1"/>
+      <site site="site_out_16_1"/>
+      <site site="site_in_17_1"/>
+      <site site="site_out_17_1"/>
+      <site site="site_in_18_1"/>
+      <site site="site_out_18_1"/>
+      <site site="site_in_19_1"/>
+      <site site="site_out_19_1"/>
+      <site site="site_in_20_1"/>
+      <site site="site_out_20_1"/>
+    </spatial>
+    <spatial name="tendon_6" width="0.001" rgba="1 0 0 1">
+      <site site="site_in_10_2"/>
+      <site site="site_out_10_2"/>
+      <site site="site_in_11_2"/>
+      <site site="site_out_11_2"/>
+      <site site="site_in_12_2"/>
+      <site site="site_out_12_2"/>
+      <site site="site_in_13_2"/>
+      <site site="site_out_13_2"/>
+      <site site="site_in_14_2"/>
+      <site site="site_out_14_2"/>
+      <site site="site_in_15_2"/>
+      <site site="site_out_15_2"/>
+      <site site="site_in_16_2"/>
+      <site site="site_out_16_2"/>
+      <site site="site_in_17_2"/>
+      <site site="site_out_17_2"/>
+      <site site="site_in_18_2"/>
+      <site site="site_out_18_2"/>
+      <site site="site_in_19_2"/>
+      <site site="site_out_19_2"/>
+      <site site="site_in_20_2"/>
+      <site site="site_out_20_2"/>
+    </spatial>
+  </tendon>
+  <actuator>
+    <position name="actuator_1" tendon="tendon_1" kp="200.0" forcerange="-200 0" ctrlrange="0.0600 0.1700"/>
+    <position name="actuator_2" tendon="tendon_2" kp="200.0" forcerange="-200 0" ctrlrange="0.0600 0.1700"/>
+    <position name="actuator_3" tendon="tendon_3" kp="200.0" forcerange="-200 0" ctrlrange="0.0600 0.1700"/>
+    <position name="actuator_4" tendon="tendon_4" kp="200.0" forcerange="-200 0" ctrlrange="0.0600 0.1700"/>
+    <position name="actuator_5" tendon="tendon_5" kp="200.0" forcerange="-200 0" ctrlrange="0.0600 0.1700"/>
+    <position name="actuator_6" tendon="tendon_6" kp="200.0" forcerange="-200 0" ctrlrange="0.0600 0.1700"/>
+  </actuator>
+  <sensor>
+    <tendonpos name="tendon1_pos" tendon="tendon_1"/>
+    <tendonpos name="tendon2_pos" tendon="tendon_2"/>
+    <tendonpos name="tendon3_pos" tendon="tendon_3"/>
+    <tendonpos name="tendon4_pos" tendon="tendon_4"/>
+    <tendonpos name="tendon5_pos" tendon="tendon_5"/>
+    <tendonpos name="tendon6_pos" tendon="tendon_6"/>
+  </sensor>
+</mujoco>

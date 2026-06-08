@@ -28,8 +28,15 @@ def compute_joint_stiffness(
     return K_i, D_i
 
 
-def generate_tentacle_xml():
-    """Generate hardcoded tentacle MuJoCo XML model."""
+def generate_tentacle_xml(num_sections: int = 1):
+    """Generate a tendon-driven tentacle MuJoCo XML model.
+
+    num_sections=1 -> the original single-section arm (3 tendons, 2 task-DOF).
+    num_sections=2 -> two independently-actuated sections (6 tendons, 4 task-DOF):
+    each of the 3 helical tendons is split at the mid-segment into a lower and an
+    upper tendon, so the two halves bend independently and the arm can form an
+    S-curve (Stage B kinematics for reach-around / stacking).
+    """
 
     # Hardcoded configuration values
     rotation_offset_degrees = 60.0
@@ -400,40 +407,52 @@ def generate_tentacle_xml():
             },
         )
 
-    # Create tendons
+    # Section boundaries over the body chain. tendon_site_names[k] holds 2 sites
+    # (in, out) per body in body order, so body b -> flat indices [2b, 2b+1].
+    # For S sections, each helical tendon k is split into S contiguous tendons.
+    num_sections = max(1, int(num_sections))
+    last_body = n_pairs - 1  # 20
+    bounds = [round(s * last_body / num_sections) for s in range(num_sections + 1)]
+
     tendon_elem = ET.SubElement(root, "tendon")
-    for k in range(3):
-        spatial_tendon = ET.SubElement(
-            tendon_elem,
-            "spatial",
-            attrib={"name": f"tendon_{k+1}", "width": "0.001", "rgba": "1 0 0 1"},
-        )
-        for site_name in tendon_site_names[k]:
-            ET.SubElement(spatial_tendon, "site", attrib={"site": site_name})
-
-    # Create actuators
     actuator_elem = ET.SubElement(root, "actuator")
-    for k in range(3):
-        ET.SubElement(
-            actuator_elem,
-            "position",
-            attrib={
-                "name": f"actuator_{k+1}",
-                "tendon": f"tendon_{k+1}",
-                "kp": str(actuator_kp),
-                "forcerange": actuator_force_range,
-                "ctrlrange": actuator_ctrl_range,
-            },
-        )
-
-    # Create sensors
     sensor_elem = ET.SubElement(root, "sensor")
-    for k in range(3):
-        ET.SubElement(
-            sensor_elem,
-            "tendonpos",
-            attrib={"name": f"tendon{k+1}_pos", "tendon": f"tendon_{k+1}"},
-        )
+
+    tendon_idx = 0
+    for s in range(num_sections):
+        body_lo, body_hi = bounds[s], bounds[s + 1]
+        # A section tendon spans only part of the arm, so its natural length (and
+        # thus ctrlrange) scales with the section's fraction of the body chain;
+        # otherwise rest length exceeds the tendon and the actuator goes slack.
+        frac = (body_hi - body_lo) / float(last_body) if last_body else 1.0
+        sec_ctrl_range = f"{ctrlrange_min * frac:.4f} {ctrlrange_max * frac:.4f}"
+        for k in range(3):
+            tendon_idx += 1
+            tendon_name = f"tendon_{tendon_idx}"
+            spatial_tendon = ET.SubElement(
+                tendon_elem,
+                "spatial",
+                attrib={"name": tendon_name, "width": "0.001", "rgba": "1 0 0 1"},
+            )
+            for site_name in tendon_site_names[k][2 * body_lo : 2 * body_hi + 2]:
+                ET.SubElement(spatial_tendon, "site", attrib={"site": site_name})
+
+            ET.SubElement(
+                actuator_elem,
+                "position",
+                attrib={
+                    "name": f"actuator_{tendon_idx}",
+                    "tendon": tendon_name,
+                    "kp": str(actuator_kp),
+                    "forcerange": actuator_force_range,
+                    "ctrlrange": sec_ctrl_range,
+                },
+            )
+            ET.SubElement(
+                sensor_elem,
+                "tendonpos",
+                attrib={"name": f"tendon{tendon_idx}_pos", "tendon": tendon_name},
+            )
 
     # Contact exclusions
     if generate_contacts:
@@ -456,9 +475,12 @@ def generate_xml(
     output_path: str = typer.Option(
         "rex_assets/rex_simulation/tentacle.xml", "--output-path", help="Output XML file path"
     ),
+    num_sections: int = typer.Option(
+        1, "--num-sections", help="1 = single section (3 tendons); 2 = S-curve (6 tendons, 4 DOF)"
+    ),
 ) -> None:
     """Generate MuJoCo XML model."""
-    xml_content = generate_tentacle_xml()
+    xml_content = generate_tentacle_xml(num_sections=num_sections)
     output_path = Path(output_path)
 
     with open(output_path, "w") as f:

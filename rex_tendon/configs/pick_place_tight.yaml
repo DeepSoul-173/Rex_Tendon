@@ -1,0 +1,52 @@
+# Tight (near-contact) grasp config: the same single-cube task as
+# pick_place_validate.yaml, but the grasp must trigger within 2.5 cm (vs 6 cm)
+# and the cube is snapped to the fingertip (no 4 cm floating crutch). Used to
+# measure the success/collision cost of a near-contact grasp before Stage B
+# inherits the gripper primitive. Warm-start with --init-model.
+pick_place:
+  env:
+    num_spawned_objects: 1
+
+    # --- near-contact grasp: tip must get within 2.5 cm (or real contact) ---
+    grasp_distance_threshold: 0.025
+    grasp_consecutive_steps: 2
+    place_distance_threshold: 0.10
+    # Snap the grasped cube to the fingertip (~1.5 cm below tip) so the carry is
+    # a real pickup, not a floating offset.
+    grasp_carry_offset: 0.015
+
+    # Enter the placing phase early (reach/grasp transfers from the warm-start).
+    curriculum_enabled: true
+    reach_only_steps: 0
+    reach_grasp_steps: 60000
+
+    # Same non-farmable reward shaping as the validated single-cube run.
+    reach_reward_scale: 1.0
+    grasp_bonus: 5.0
+    object_progress_reward_scale: 3.0
+    transport_reward_scale: 0.0
+    place_bonus: 25.0
+    drop_penalty: 3.0
+    time_penalty: 0.05
+
+    randomize_dynamics: true
+    add_observation_noise: true
+    action_smoothing_alpha: 0.45
+    max_action_delta_per_step: 0.25
+
+  training:
+    num_envs: 12
+    total_timesteps: 1200000   # ~45-55 min; bump if not converged
+    eval_freq: 20000
+    save_freq: 100000
+    learning_rate: 0.0003
+    n_steps: 1024
+    batch_size: 256
+    log_dir_base: "rex_results/pick_place_tight"
+
+  active_task: task1
+  tasks:
+    task1:
+      name: task1
+      active_object_index: 0
+      randomize_object_position: true

@@ -97,6 +97,12 @@ class PickPlaceEnvConfig(BaseConfig):
         default=2,
         description="Steps without a contact/proximity signal before an unassisted grasp is released",
     )
+    grasp_carry_offset: Optional[float] = Field(
+        default=None,
+        description="If set, a grasped object is snapped to this fixed distance (m) "
+        "below the tip (fingertip grip) instead of freezing the proximity offset; "
+        "makes the carry look like a real contact pickup rather than a floating crutch",
+    )
     place_distance_threshold: float = Field(
         default=0.10, description="Distance threshold for successful placement (meters)"
     )

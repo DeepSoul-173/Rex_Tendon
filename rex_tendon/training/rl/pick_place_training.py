@@ -355,6 +355,9 @@ def train(
     total_timesteps: Optional[int] = typer.Option(None, help="Override total timesteps"),
     num_envs: Optional[int] = typer.Option(None, help="Override number of environments"),
     learning_rate: Optional[float] = typer.Option(None, help="Override learning rate"),
+    init_model: Optional[str] = typer.Option(
+        None, "--init-model", help="Warm-start from a trained model (.zip); identical obs"
+    ),
     verbose: bool = typer.Option(True, help="Enable verbose output"),
 ) -> None:
     """Train pick-and-place RL model."""
@@ -435,6 +438,16 @@ def train(
         tensorboard_log=str(log_dir),
         device=device,
     )
+
+    if init_model:
+        try:
+            model.set_parameters(init_model, exact_match=True)
+            if verbose:
+                console.print(f"[dim]Warm-started policy from {init_model}[/dim]")
+        except Exception as exc:  # noqa: BLE001 - fall back gracefully
+            console.print(
+                f"[yellow]Warm-start failed ({exc}); training from scratch.[/yellow]"
+            )
 
     # Callbacks
     save_freq = max(1, pp_config.training.save_freq // pp_config.training.num_envs)

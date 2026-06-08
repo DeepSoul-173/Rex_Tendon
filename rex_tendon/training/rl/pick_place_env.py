@@ -150,6 +150,7 @@ class TentaclePickPlaceEnv(gym.Env):
         self.grasp_contact_force_threshold = self.config.grasp_contact_force_threshold
         self.grasp_consecutive_steps = self.config.grasp_consecutive_steps
         self.grasp_release_grace_steps = self.config.grasp_release_grace_steps
+        self.grasp_carry_offset = self.config.grasp_carry_offset
         self.place_distance_threshold = self.config.place_distance_threshold
 
         # Curriculum
@@ -525,14 +526,21 @@ class TentaclePickPlaceEnv(gym.Env):
             self.model.geom_pos[geom_id] = position + np.array([0.0, 0.0, -0.002])
 
     def _activate_grasp(self, obj_idx: int):
-        """Mark a verified physical grasp/contact."""
+        """Mark a verified grasp/contact and set how the object is carried."""
         self.is_grasped = True
         self.grasp_triggered = True
         self.no_contact_grace_steps = 0
-        self.grasp_local_offset = (
-            self._get_object_position(obj_idx) - self._get_tip_position()
-        ).astype(np.float32)
-        logger.debug("Contact grasp attained on object %s", obj_idx)
+        if self.grasp_carry_offset is not None:
+            # Snap the object to the fingertip (real contact-pickup look) rather
+            # than freezing the (looser) proximity offset.
+            self.grasp_local_offset = np.array(
+                [0.0, 0.0, -float(self.grasp_carry_offset)], dtype=np.float32
+            )
+        else:
+            self.grasp_local_offset = (
+                self._get_object_position(obj_idx) - self._get_tip_position()
+            ).astype(np.float32)
+        logger.debug("Grasp attained on object %s", obj_idx)
 
     def _deactivate_grasp(self, obj_idx: int):
         """Disable programmatic grasp."""

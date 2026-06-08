@@ -470,6 +470,98 @@ def generate_tentacle_xml(num_sections: int = 1):
     return reparsed.toprettyxml(indent="  ")
 
 
+def make_two_section_scene(
+    in_path: str,
+    out_path: str,
+    split_body: int = 10,
+    ctrl_min: float = 0.06,
+    ctrl_max: float = 0.17,
+) -> None:
+    """Transform a single-section pick-place scene into a 2-section (4-DOF) one.
+
+    Splits each of the 3 helical tendons at ``split_body`` into a lower + upper
+    tendon (6 tendons / actuators, per-section ctrlrange), preserving the rest of
+    the scene (desk, objects, base-yaw, cameras) verbatim. Tendon numbering
+    matches the generator: tendons 1-3 = lower section, 4-6 = upper section.
+    """
+    import re
+
+    text = Path(in_path).read_text()
+
+    # --- rewrite the <tendon> block ---
+    tendon_block = re.search(r"<tendon>(.*?)</tendon>", text, re.DOTALL)
+    spatials = re.findall(
+        r'<spatial name="tendon_(\d+)"[^>]*>(.*?)</spatial>',
+        tendon_block.group(1),
+        re.DOTALL,
+    )
+    lower, upper = [], []  # one site-list per original helical tendon
+    for _k, sites_text in spatials:
+        names = re.findall(r'site="(site_(?:in|out)_(\d+)_\d+)"', sites_text)
+        lower.append([n for n, b in names if int(b) <= split_body])
+        upper.append([n for n, b in names if int(b) >= split_body])
+
+    def emit_tendon(idx, sites):
+        out = f'    <spatial name="tendon_{idx}" width="0.001" rgba="1 0 0 1">\n'
+        for sn in sites:
+            out += f'      <site site="{sn}"/>\n'
+        return out + "    </spatial>\n"
+
+    new_tendons = "\n"
+    idx = 0
+    for section in (lower, upper):
+        for sites in section:
+            idx += 1
+            new_tendons += emit_tendon(idx, sites)
+    new_tendons += "  "
+    text = (
+        text[: tendon_block.start()]
+        + "<tendon>"
+        + new_tendons
+        + "</tendon>"
+        + text[tendon_block.end() :]
+    )
+
+    # --- rewrite the <actuator> block: 6 tendon actuators + keep non-tendon ones ---
+    act_block = re.search(r"<actuator>(.*?)</actuator>", text, re.DOTALL)
+    non_tendon = re.findall(
+        r'<position name="(?!actuator_\d)[^"]*"[^>]*/>', act_block.group(1)
+    )
+    sec_range = f"{ctrl_min:.3f} {ctrl_max:.3f}"
+    new_acts = "\n"
+    for i in range(1, 7):
+        new_acts += (
+            f'    <position name="actuator_{i}" tendon="tendon_{i}" kp="200.0" '
+            f'forcerange="-200 0" ctrlrange="{sec_range}"/>\n'
+        )
+    for line in non_tendon:
+        new_acts += f"    {line}\n"
+    new_acts += "  "
+    text = (
+        text[: act_block.start()]
+        + "<actuator>"
+        + new_acts
+        + "</actuator>"
+        + text[act_block.end() :]
+    )
+
+    Path(out_path).write_text(text)
+
+
+@app.command(name="make-2section-scene")
+def make_2section_scene_cmd(
+    in_path: str = typer.Option(
+        "rex_assets/rex_simulation/pick_and_place_scene.xml", "--in", help="Single-section scene"
+    ),
+    out_path: str = typer.Option(
+        "rex_assets/rex_simulation/pick_and_place_scene_2section.xml", "--out", help="Output 2-section scene"
+    ),
+) -> None:
+    """Generate the 2-section (4-DOF) pick-place scene from the single-section one."""
+    make_two_section_scene(in_path, out_path)
+    console.print(f"2-section scene written: {out_path}")
+
+
 @app.command()
 def generate_xml(
     output_path: str = typer.Option(

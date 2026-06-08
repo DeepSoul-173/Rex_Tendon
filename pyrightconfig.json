@@ -3,10 +3,38 @@
     "pythonVersion": "3.12",
     "venvPath": ".",
     "venv": ".venv",
+    "include": [
+        "rex_tendon",
+        "run_vision_pick_place.py",
+        "run_voice_assistant.py",
+        "nemoclaw_bridge.py",
+        "run_rl.py",
+        "run_hand_control.py"
+    ],
+    "exclude": [
+        "**/__pycache__",
+        ".venv",
+        ".pytest_cache",
+        "rex_results",
+        "rex_assets",
+        "rex_tendon/notebooks",
+        "rex_tendon/training/vision/datasets",
+        "build",
+        "dist"
+    ],
     "reportMissingTypeStubs": "none",
-    "reportAttributeAccessIssue": "none",
-    "reportArgumentType": "none",
-    "reportReturnType": "none",
-    "reportGeneralTypeIssues": "none",
-    "reportOptionalMemberAccess": "none"
+    "reportMissingImports": "warning",
+    "reportOptionalMemberAccess": "warning",
+    "reportUnknownMemberType": "none",
+    "reportUnknownVariableType": "none",
+    "reportUnknownArgumentType": "none",
+    "reportPrivateImportUsage": "none",
+    "executionEnvironments": [
+        {
+            "root": ".",
+            "extraPaths": [
+                "."
+            ]
+        }
+    ]
 }

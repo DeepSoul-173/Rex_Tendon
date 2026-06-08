@@ -2,6 +2,7 @@
 
 import logging
 import multiprocessing as mp
+from collections import deque
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -32,17 +33,23 @@ app = typer.Typer(help="Pick-and-place RL training utilities")
 
 
 class PickPlaceMetricsCallback(BaseCallback):
-    """Custom callback to log pick-and-place specific metrics."""
+    """Log pick-and-place metrics as rolling-window rates over recent episodes.
 
-    def __init__(self, verbose: int = 0):
+    Cumulative lifetime rates barely move once millions of steps accumulate, so
+    they hide whether the policy is *currently* improving. Rolling windows make
+    grasp/lift/place/drop rates responsive to recent performance.
+    """
+
+    def __init__(self, verbose: int = 0, window: int = 200):
         super().__init__(verbose)
-        self.grasp_successes = 0
-        self.place_successes = 0
-        self.drop_count = 0
         self.episode_count = 0
-        self.action_changes = []
-        self.action_jerks = []
-        self.object_distances = []
+        self.ep_grasped = deque(maxlen=window)
+        self.ep_lifted = deque(maxlen=window)
+        self.ep_placed = deque(maxlen=window)
+        self.ep_dropped = deque(maxlen=window)
+        self.action_changes = deque(maxlen=2000)
+        self.action_jerks = deque(maxlen=2000)
+        self.object_distances = deque(maxlen=2000)
 
     def _on_step(self) -> bool:
         for info in self.locals.get("infos", []):
@@ -53,49 +60,53 @@ class PickPlaceMetricsCallback(BaseCallback):
             if "object_to_place_distance" in info:
                 self.object_distances.append(info["object_to_place_distance"])
 
-        # Check for completed episodes
-        for info in self.locals.get("infos", []):
+            # Record one outcome per completed episode (Monitor adds "episode").
             if "episode" in info:
                 self.episode_count += 1
-                if info.get("place_success", False):
-                    self.place_successes += 1
-                if info.get("is_grasped", False) or info.get("place_success", False):
-                    self.grasp_successes += 1
-                if info.get("was_dropped", False):
-                    self.drop_count += 1
+                placed = bool(info.get("place_success", False))
+                self.ep_placed.append(1.0 if placed else 0.0)
+                self.ep_grasped.append(
+                    1.0 if (placed or info.get("is_grasped", False)) else 0.0
+                )
+                self.ep_lifted.append(1.0 if info.get("object_lifted", False) else 0.0)
+                self.ep_dropped.append(1.0 if info.get("was_dropped", False) else 0.0)
 
-        # Log metrics every 1000 steps
-        if self.num_timesteps % 1000 == 0 and self.episode_count > 0:
-            grasp_rate = self.grasp_successes / max(1, self.episode_count) * 100
-            place_rate = self.place_successes / max(1, self.episode_count) * 100
-            drop_rate = self.drop_count / max(1, self.episode_count) * 100
-
-            self.logger.record("pick_place/grasp_success_rate", grasp_rate)
-            self.logger.record("pick_place/place_success_rate", place_rate)
-            self.logger.record("pick_place/drop_rate", drop_rate)
+        # Log rolling metrics every 1000 steps
+        if self.num_timesteps % 1000 == 0 and self.ep_placed:
+            self.logger.record(
+                "pick_place/grasp_success_rate", 100.0 * float(np.mean(self.ep_grasped))
+            )
+            self.logger.record(
+                "pick_place/lift_rate", 100.0 * float(np.mean(self.ep_lifted))
+            )
+            self.logger.record(
+                "pick_place/place_success_rate", 100.0 * float(np.mean(self.ep_placed))
+            )
+            self.logger.record(
+                "pick_place/drop_rate", 100.0 * float(np.mean(self.ep_dropped))
+            )
             self.logger.record("pick_place/total_episodes", self.episode_count)
+            self.logger.record("pick_place/window_episodes", len(self.ep_placed))
             if self.action_changes:
                 self.logger.record(
-                    "pick_place/mean_action_change",
-                    float(np.mean(self.action_changes[-1000:])),
+                    "pick_place/mean_action_change", float(np.mean(self.action_changes))
                 )
             if self.action_jerks:
                 self.logger.record(
-                    "pick_place/mean_action_jerk",
-                    float(np.mean(self.action_jerks[-1000:])),
+                    "pick_place/mean_action_jerk", float(np.mean(self.action_jerks))
                 )
             if self.object_distances:
                 self.logger.record(
                     "pick_place/mean_object_to_place_distance",
-                    float(np.mean(self.object_distances[-1000:])),
+                    float(np.mean(self.object_distances)),
                 )
 
             # Get curriculum phase from first info
             for info in self.locals.get("infos", []):
                 if "curriculum_phase" in info:
-                    phase_names = {0: "REACH", 1: "REACH_GRASP", 2: "FULL"}
-                    phase = info["curriculum_phase"]
-                    self.logger.record("pick_place/curriculum_phase", phase)
+                    self.logger.record(
+                        "pick_place/curriculum_phase", info["curriculum_phase"]
+                    )
                     break
 
         return True

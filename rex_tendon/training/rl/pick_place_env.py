@@ -1,21 +1,28 @@
 """MuJoCo-based pick-and-place RL environment for tendon-driven continuum robots."""
 
-import gymnasium as gym
-from gymnasium import spaces
-from gymnasium.core import RenderFrame
-import numpy as np
-from typing import Tuple, Dict, Any, Optional, Union, List
-import mujoco
-import mujoco.viewer
 import os
 from collections import deque
 import logging
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import gymnasium as gym
+import mujoco
+import mujoco.viewer
+import numpy as np
+from gymnasium import spaces
+from gymnasium.core import RenderFrame
 
 from ...common.constants import MOTOR_NAMES
 from ...configs.pick_place_config import PickPlaceEnvConfig
 from ...control.geometry import convert_2d_cursor_to_target_lengths
 
 logger = logging.getLogger(__name__)
+
+TABLE_TOP_GEOM_NAME = "table_top"
+TIP_CONTACT_GEOM_NAME = "tip_contact"
+DEFAULT_TABLE_SURFACE_Z = 0.0
+OBJECT_SPAWN_CLEARANCE = 0.002
+LIFT_SUCCESS_HEIGHT = 0.02
 
 
 class PickPlacePhase:
@@ -78,6 +85,7 @@ class TentaclePickPlaceEnv(gym.Env):
 
         self.model = mujoco.MjModel.from_xml_path(xml_file)
         self.data = mujoco.MjData(self.model)
+        mujoco.mj_forward(self.model, self.data)
 
         # Time parameters
         self.simulation_length_seconds = self.config.simulation_length_seconds
@@ -126,14 +134,17 @@ class TentaclePickPlaceEnv(gym.Env):
         self.action_jerk_penalty_scale = self.config.action_jerk_penalty_scale
         self.object_progress_reward_scale = self.config.object_progress_reward_scale
         self.stable_contact_bonus_scale = self.config.stable_contact_bonus_scale
+        self.grasp_proximity_bonus_scale = self.config.grasp_proximity_bonus_scale
         self.assisted_grasp_enabled = self.config.assisted_grasp_enabled
         self.assisted_grasp_follow_alpha = np.clip(
             self.config.assisted_grasp_follow_alpha, 0.0, 1.0
         )
 
-        # Grasping parameters
+        # Grasping parameters (hybrid trigger: real contact OR close proximity)
         self.grasp_distance_threshold = self.config.grasp_distance_threshold
+        self.grasp_contact_force_threshold = self.config.grasp_contact_force_threshold
         self.grasp_consecutive_steps = self.config.grasp_consecutive_steps
+        self.grasp_release_grace_steps = self.config.grasp_release_grace_steps
         self.place_distance_threshold = self.config.place_distance_threshold
 
         # Curriculum
@@ -144,6 +155,7 @@ class TentaclePickPlaceEnv(gym.Env):
         # Object spawn bounds
         self.object_spawn_min = np.array(self.config.object_spawn_bounds_min)
         self.object_spawn_max = np.array(self.config.object_spawn_bounds_max)
+        self.num_spawned_objects = int(self.config.num_spawned_objects)
 
         # MuJoCo IDs
         self.tip_site_id = mujoco.mj_name2id(
@@ -165,6 +177,14 @@ class TentaclePickPlaceEnv(gym.Env):
         self.object_site_ids = []
         self.object_geom_ids = []
         self.grasp_constraint_ids = []
+        self.tip_geom_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_GEOM, TIP_CONTACT_GEOM_NAME
+        )
+        if self.tip_geom_id == -1:
+            logger.warning(
+                "Tip contact geom '%s' not found; grasp detection cannot use contact force.",
+                TIP_CONTACT_GEOM_NAME,
+            )
 
         for i, name in enumerate(self.config.object_names):
             bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
@@ -197,9 +217,17 @@ class TentaclePickPlaceEnv(gym.Env):
                 gid = mujoco.mj_name2id(
                     self.model, mujoco.mjtObj.mjOBJ_GEOM, geom_name
                 )
+                if gid == -1:
+                    gid = self._first_geom_id_for_body(bid)
+                    logger.warning(
+                        "Geom '%s' not found for body '%s'; using first body geom id %s.",
+                        geom_name,
+                        name,
+                        gid,
+                    )
                 self.object_geom_ids.append(gid)
             else:
-                self.object_geom_ids.append(-1)
+                self.object_geom_ids.append(self._first_geom_id_for_body(bid))
 
         if not self.object_body_ids:
             raise ValueError(
@@ -209,6 +237,16 @@ class TentaclePickPlaceEnv(gym.Env):
 
         # Equality constraints — one per found body
         self.grasp_constraint_ids = [-1] * len(self.object_body_ids)
+        self.table_surface_z = self._infer_table_surface_z()
+        self.object_rest_z = np.array(
+            [
+                self.table_surface_z
+                + self._get_geom_vertical_extent(gid)
+                + OBJECT_SPAWN_CLEARANCE
+                for gid in self.object_geom_ids
+            ],
+            dtype=np.float32,
+        )
 
         # State tracking
         self._elapsed_steps = 0
@@ -221,6 +259,9 @@ class TentaclePickPlaceEnv(gym.Env):
         # Grasping state
         self.is_grasped = False
         self.grasp_proximity_count = 0
+        self.grasp_contact_count = 0
+        self.no_contact_grace_steps = 0
+        self._last_tip_object_contact_force = 0.0
         self.active_object_idx = 0  # Which object to pick (selected at reset)
         self.grasp_triggered = False
         self.place_success = False
@@ -247,9 +288,13 @@ class TentaclePickPlaceEnv(gym.Env):
         self.action_dim = 2
 
         # Actuator ranges
+        # Only the 3 tendon actuators are RL-controlled. A 4th actuator (base
+        # yaw) may exist in the model for teleoperation; it is held at 0 here so
+        # the RL task stays a clean 2-DOF bend problem with a 3-tendon obs.
         actuator_ctrlrange = self.model.actuator_ctrlrange
-        self.actuator_low = actuator_ctrlrange[:, 0]
-        self.actuator_high = actuator_ctrlrange[:, 1]
+        self.num_tendon_actuators = 3
+        self.actuator_low = actuator_ctrlrange[: self.num_tendon_actuators, 0]
+        self.actuator_high = actuator_ctrlrange[: self.num_tendon_actuators, 1]
 
         # Observation space
         # tip_pos(3) + obj_pos(3) + place_pos(3) + grasp_state(1) + prev_action(2) = 12
@@ -266,6 +311,86 @@ class TentaclePickPlaceEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=stacked_obs_shape, dtype=np.float32
         )
+
+    def _first_geom_id_for_body(self, body_id: int) -> int:
+        """Return the first collision geom attached to a body, or -1 if absent."""
+        geom_adr = int(self.model.body_geomadr[body_id])
+        geom_num = int(self.model.body_geomnum[body_id])
+        return geom_adr if geom_adr >= 0 and geom_num > 0 else -1
+
+    def _infer_table_surface_z(self) -> float:
+        """Infer the table top surface in world coordinates."""
+        table_geom_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_GEOM, TABLE_TOP_GEOM_NAME
+        )
+        if table_geom_id < 0:
+            return DEFAULT_TABLE_SURFACE_Z
+
+        mujoco.mj_forward(self.model, self.data)
+        center_z = float(self.data.geom_xpos[table_geom_id][2])
+        half_height = float(self.model.geom_size[table_geom_id][2])
+        return center_z + half_height
+
+    def _get_geom_vertical_extent(self, geom_id: int) -> float:
+        """Return conservative half-height of a geom in world Z."""
+        if geom_id < 0:
+            return 0.01
+
+        geom_type = int(self.model.geom_type[geom_id])
+        size = self.model.geom_size[geom_id]
+        xmat = self.data.geom_xmat[geom_id].reshape(3, 3)
+
+        if geom_type == mujoco.mjtGeom.mjGEOM_BOX:
+            return float(np.sum(np.abs(xmat[2, :]) * size[:3]))
+        if geom_type == mujoco.mjtGeom.mjGEOM_CYLINDER:
+            axis_z = abs(float(xmat[2, 2]))
+            radius = float(size[0])
+            half_length = float(size[1])
+            return axis_z * half_length + np.sqrt(max(0.0, 1.0 - axis_z**2)) * radius
+        if geom_type == mujoco.mjtGeom.mjGEOM_CAPSULE:
+            axis_z = abs(float(xmat[2, 2]))
+            return float(size[0]) + axis_z * float(size[1])
+        if geom_type == mujoco.mjtGeom.mjGEOM_SPHERE:
+            return float(size[0])
+
+        return float(max(size[0], 0.01))
+
+    def _object_rest_position(self, obj_idx: int, xy: np.ndarray) -> np.ndarray:
+        """Build a stable object center position from an XY sample."""
+        return np.array([xy[0], xy[1], self.object_rest_z[obj_idx]], dtype=np.float32)
+
+    def _sample_nonoverlapping_object_xy(
+        self, placed_xy: List[np.ndarray], min_separation: float = 0.045
+    ) -> np.ndarray:
+        """Sample a tabletop XY position that does not start inside another object."""
+        for _ in range(100):
+            xy = self.np_random.uniform(
+                low=self.object_spawn_min[:2],
+                high=self.object_spawn_max[:2],
+            ).astype(np.float32)
+            outside_robot_base = np.linalg.norm(xy) >= 0.075
+            separated = all(
+                np.linalg.norm(xy - prev_xy) >= min_separation
+                for prev_xy in placed_xy
+            )
+            if outside_robot_base and separated:
+                return xy
+
+        span = self.object_spawn_max[:2] - self.object_spawn_min[:2]
+        grid_cols = max(1, int(np.ceil(np.sqrt(len(placed_xy) + 1))))
+        grid_row = len(placed_xy) // grid_cols
+        grid_col = len(placed_xy) % grid_cols
+        cell = np.array(
+            [
+                (grid_col + 0.5) / grid_cols,
+                (grid_row + 0.5) / grid_cols,
+            ],
+            dtype=np.float32,
+        )
+        xy = (self.object_spawn_min[:2] + span * cell).astype(np.float32)
+        if np.linalg.norm(xy) < 0.075:
+            xy[0] = np.sign(xy[0] or 1.0) * 0.09
+        return xy
 
     def _get_curriculum_phase(self) -> int:
         """Determine current curriculum phase based on global step count."""
@@ -305,6 +430,13 @@ class TentaclePickPlaceEnv(gym.Env):
         if jnt_adr < 0:
             return
 
+        position = np.asarray(position, dtype=np.float32).copy()
+        min_center_z = float(self.object_rest_z[obj_idx])
+        if position[2] <= self.table_surface_z + OBJECT_SPAWN_CLEARANCE:
+            position[2] = min_center_z
+        else:
+            position[2] = max(float(position[2]), min_center_z)
+
         qpos_adr = self.model.jnt_qposadr[jnt_adr]
         qvel_adr = self.model.jnt_dofadr[jnt_adr]
         self.data.qpos[qpos_adr : qpos_adr + 3] = position
@@ -313,6 +445,10 @@ class TentaclePickPlaceEnv(gym.Env):
 
     def _set_place_zone_position(self, position: np.ndarray) -> None:
         """Move the worldbody place-zone site for predefined tasks."""
+        position = np.asarray(position, dtype=np.float32).copy()
+        if position[2] < self.table_surface_z:
+            position[2] = self.table_surface_z + 0.002
+
         if self.place_zone_site_id >= 0:
             self.model.site_pos[self.place_zone_site_id] = position
 
@@ -323,23 +459,49 @@ class TentaclePickPlaceEnv(gym.Env):
             self.model.geom_pos[geom_id] = position + np.array([0.0, 0.0, -0.002])
 
     def _activate_grasp(self, obj_idx: int):
-        """Enable kinematic programmatic grasp flag (physics teleport removed)."""
+        """Mark a verified physical grasp/contact."""
         self.is_grasped = True
         self.grasp_triggered = True
+        self.no_contact_grace_steps = 0
         self.grasp_local_offset = (
             self._get_object_position(obj_idx) - self._get_tip_position()
         ).astype(np.float32)
-        logger.debug(f"Grasp proximity attained on object {obj_idx}")
+        logger.debug("Contact grasp attained on object %s", obj_idx)
 
     def _deactivate_grasp(self, obj_idx: int):
         """Disable programmatic grasp."""
         self.is_grasped = False
-        logger.debug(f"Grasp released on object {obj_idx}")
+        self.grasp_contact_count = 0
+        self.no_contact_grace_steps = 0
+        logger.debug("Grasp released on object %s", obj_idx)
 
     def _deactivate_all_grasps(self):
         """Deactivate all programmatic grasp states."""
         self.is_grasped = False
         self.grasp_proximity_count = 0
+        self.grasp_contact_count = 0
+        self.no_contact_grace_steps = 0
+        self._last_tip_object_contact_force = 0.0
+
+    def _tip_object_contact_force(self, obj_idx: int) -> float:
+        """Return normal contact force between the tip collision geom and object."""
+        if self.tip_geom_id < 0 or obj_idx >= len(self.object_geom_ids):
+            return 0.0
+
+        object_geom_id = self.object_geom_ids[obj_idx]
+        if object_geom_id < 0:
+            return 0.0
+
+        total_force = 0.0
+        force = np.zeros(6, dtype=np.float64)
+        for contact_idx in range(self.data.ncon):
+            contact = self.data.contact[contact_idx]
+            geom_pair = {int(contact.geom1), int(contact.geom2)}
+            if self.tip_geom_id in geom_pair and object_geom_id in geom_pair:
+                mujoco.mj_contactForce(self.model, self.data, contact_idx, force)
+                total_force += max(0.0, float(force[0]))
+
+        return total_force
 
     def _get_current_raw_obs(self) -> np.ndarray:
         """Get raw observation for current state (single frame)."""
@@ -355,7 +517,11 @@ class TentaclePickPlaceEnv(gym.Env):
             parts.extend([tip_pos - obj_pos, obj_pos - place_pos])
 
         if self.include_actuator_lengths_in_obs:
-            actuator_lengths = self.data.actuator_length.copy().astype(np.float32)
+            actuator_lengths = (
+                self.data.actuator_length[: self.num_tendon_actuators]
+                .copy()
+                .astype(np.float32)
+            )
             parts.append(actuator_lengths)
 
         if self.include_object_velocity_in_obs:
@@ -382,7 +548,8 @@ class TentaclePickPlaceEnv(gym.Env):
 
     def _randomize_object_positions(self):
         """Randomize positions of graspable objects on the desk."""
-        num_cubes = self.np_random.integers(5, min(11, len(self.object_body_ids) + 1))
+        num_cubes = max(1, min(self.num_spawned_objects, len(self.object_body_ids)))
+        placed_xy: List[np.ndarray] = []
 
         for i, body_id in enumerate(self.object_body_ids):
             # Find the joint for this body (freejoint)
@@ -392,15 +559,17 @@ class TentaclePickPlaceEnv(gym.Env):
                 qvel_adr = self.model.jnt_dofadr[jnt_adr]
 
                 if i < num_cubes:
-                    # Random XY position on desk, Z at desk surface
-                    new_pos = self.np_random.uniform(
-                        low=self.object_spawn_min,
-                        high=self.object_spawn_max,
-                    )
+                    xy = self._sample_nonoverlapping_object_xy(placed_xy)
+                    placed_xy.append(xy)
+                    new_pos = self._object_rest_position(i, xy)
                     self.data.qpos[qpos_adr : qpos_adr + 3] = new_pos
                 else:
-                    # Hide unused objects deep under the table
-                    self.data.qpos[qpos_adr : qpos_adr + 3] = [0.0, 0.0, -2.0]
+                    # Park unused objects far from the workspace but above the floor.
+                    self.data.qpos[qpos_adr : qpos_adr + 3] = [
+                        10.0 + 0.1 * i,
+                        10.0,
+                        float(self.object_rest_z[i]),
+                    ]
 
                 # Reset orientation (quaternion: w, x, y, z)
                 self.data.qpos[qpos_adr + 3 : qpos_adr + 7] = [1, 0, 0, 0]
@@ -420,6 +589,9 @@ class TentaclePickPlaceEnv(gym.Env):
         self._elapsed_steps = 0
         self.is_grasped = False
         self.grasp_proximity_count = 0
+        self.grasp_contact_count = 0
+        self.no_contact_grace_steps = 0
+        self._last_tip_object_contact_force = 0.0
         self.grasp_triggered = False
         self.place_success = False
         self.obs_buffer.clear()
@@ -437,15 +609,14 @@ class TentaclePickPlaceEnv(gym.Env):
                 np.array(task.place_position, dtype=np.float32)
             )
 
-        # Select object to pick
+        # Select object to pick (only from the spawned-on-desk subset)
+        num_on_desk = max(1, min(self.num_spawned_objects, len(self.object_body_ids)))
         if task and task.active_object_index is not None:
             self.active_object_idx = int(
-                np.clip(task.active_object_index, 0, len(self.object_body_ids) - 1)
+                np.clip(task.active_object_index, 0, num_on_desk - 1)
             )
         else:
-            self.active_object_idx = self.np_random.integers(
-                0, len(self.object_body_ids)
-            )
+            self.active_object_idx = self.np_random.integers(0, num_on_desk)
 
         # Randomize or set object positions
         if task is None or task.randomize_object_position:
@@ -481,9 +652,11 @@ class TentaclePickPlaceEnv(gym.Env):
         }
 
         self.current_position = initial_positions.copy()
-        self.data.ctrl[:] = self.current_position
+        self.data.ctrl[: self.num_tendon_actuators] = self.current_position
         self.previous_action = np.zeros(self.action_dim, dtype=np.float32)
         self.previous_previous_action = np.zeros(self.action_dim, dtype=np.float32)
+
+        mujoco.mj_forward(self.model, self.data)
 
         # Set target site to object position for visualization
         obj_pos = self._get_object_position(self.active_object_idx)
@@ -542,8 +715,8 @@ class TentaclePickPlaceEnv(gym.Env):
             self.max_2d_action_magnitude,
         )
 
-        # Apply controls
-        self.data.ctrl[:] = new_tendon_lengths
+        # Apply controls (tendons only; base-yaw actuator stays at 0 for RL)
+        self.data.ctrl[: self.num_tendon_actuators] = new_tendon_lengths
         self.current_position = new_tendon_lengths.copy()
 
         # Step physics
@@ -582,8 +755,8 @@ class TentaclePickPlaceEnv(gym.Env):
 
         for i, body_id in enumerate(self.object_body_ids):
             cube_pos = self.data.xpos[body_id]
-            # Ignore hidden cubes (z < -1.0)
-            if cube_pos[2] < -1.0:
+            # Ignore objects parked outside the workspace.
+            if cube_pos[2] < -1.0 or np.linalg.norm(cube_pos[:2]) > 1.0:
                 continue
             dist = np.linalg.norm(tip_pos - cube_pos)
             if dist < min_dist:
@@ -620,12 +793,23 @@ class TentaclePickPlaceEnv(gym.Env):
         # Get curriculum phase
         phase = self._get_curriculum_phase()
 
-        # ===== GRASPING LOGIC =====
+        # ===== GRASPING LOGIC (hybrid trigger: real contact OR close proximity) =====
+        was_grasped = self.is_grasped
         was_dropped = False
+        contact_force = self._tip_object_contact_force(self.active_object_idx)
+        self._last_tip_object_contact_force = contact_force
+        has_tip_object_contact = contact_force >= self.grasp_contact_force_threshold
+        within_grasp_proximity = tip_to_obj <= self.grasp_distance_threshold
+        grasp_signal = has_tip_object_contact or within_grasp_proximity
+        lift_height = max(0.0, float(obj_pos[2] - self.object_rest_z[self.active_object_idx]))
+        is_lifted = lift_height >= LIFT_SUCCESS_HEIGHT
+
+        # Track real contact separately from the (looser) grasp signal so the
+        # detector state is honest and debuggable.
+        self.grasp_contact_count = self.grasp_contact_count + 1 if has_tip_object_contact else 0
 
         if not self.is_grasped:
-            # Check if tip is close enough to object
-            if tip_to_obj < self.grasp_distance_threshold:
+            if grasp_signal:
                 self.grasp_proximity_count += 1
                 if (
                     self.grasp_proximity_count >= self.grasp_consecutive_steps
@@ -635,20 +819,53 @@ class TentaclePickPlaceEnv(gym.Env):
             else:
                 self.grasp_proximity_count = 0
         else:
-            # Check for drop (object too far from tip while grasped)
-            if tip_to_obj > self.grasp_distance_threshold * 3:
+            # While carried (assisted) the grasp holds; otherwise it must keep a
+            # contact/proximity signal or it is released after a short grace.
+            if grasp_signal or self.assisted_grasp_enabled:
+                self.no_contact_grace_steps = 0
+            else:
+                self.no_contact_grace_steps += 1
+                if self.no_contact_grace_steps >= self.grasp_release_grace_steps:
+                    self._deactivate_grasp(self.active_object_idx)
+                    was_dropped = not is_lifted
+
+            if obj_pos[2] < self.table_surface_z - 0.02:
                 self._deactivate_grasp(self.active_object_idx)
                 was_dropped = True
 
-        # ===== REWARD CALCULATION =====
-        reward = 0.0
+        obj_on_table_or_above = obj_pos[2] >= self.object_rest_z[self.active_object_idx] - 0.005
+        self.place_success = (
+            phase >= PickPlacePhase.FULL
+            and self.is_grasped
+            and obj_to_place <= self.place_distance_threshold
+            and obj_on_table_or_above
+        )
 
-        # Shaping reward based on distance to active object (closest cube if not grasped)
+        # ===== REWARD CALCULATION =====
         reward = -self.reach_reward_scale * tip_to_obj
 
-        # Add large sparse reward bonus if the active cube has been lifted off the table
-        if obj_pos[2] > 0.05:
-            reward += 10.0
+        if has_tip_object_contact:
+            reward += self.stable_contact_bonus_scale * min(contact_force, 5.0)
+        if within_grasp_proximity and not self.is_grasped:
+            # Reward settling into grasp range (replaces the old proximity penalty).
+            reward += self.grasp_proximity_bonus_scale * (
+                1.0 - tip_to_obj / max(self.grasp_distance_threshold, 1e-6)
+            )
+
+        if self.is_grasped and not was_grasped:
+            reward += self.grasp_bonus
+
+        if self.is_grasped or has_tip_object_contact:
+            # Potential-based (signed) progress: moving toward the zone is
+            # rewarded, away is penalised, so oscillation nets zero.
+            reward += self.object_progress_reward_scale * object_progress
+            reward += self.transport_reward_scale * lift_height
+
+        if was_dropped:
+            reward -= self.drop_penalty
+
+        if self.place_success:
+            reward += self.place_bonus
 
         # Action change penalty
         action_change = np.linalg.norm(action - previous_action)
@@ -676,6 +893,12 @@ class TentaclePickPlaceEnv(gym.Env):
         info["object_to_place_distance"] = obj_to_place
         info["tip_to_place_distance"] = tip_to_place
         info["object_progress"] = object_progress
+        info["tip_object_contact"] = has_tip_object_contact
+        info["tip_object_contact_force"] = contact_force
+        info["grasp_within_proximity"] = within_grasp_proximity
+        info["grasp_signal"] = grasp_signal
+        info["object_lift_height"] = lift_height
+        info["object_lifted"] = is_lifted
         info["is_grasped"] = self.is_grasped
         info["was_dropped"] = was_dropped
         info["place_success"] = self.place_success

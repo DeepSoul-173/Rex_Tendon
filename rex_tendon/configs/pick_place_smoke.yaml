@@ -26,5 +26,5 @@ pick_place:
       name: task1
       active_object_index: 0
       object_position: [0.08, -0.05, 0.0]
-      place_position: [-0.08, 0.08, -0.025]
+      place_position: [-0.08, 0.08, 0.002]
       randomize_object_position: true

@@ -1,0 +1,50 @@
+# Fast validation config: learn a SINGLE-cube pick-and-place quickly, to prove
+# the pipeline works end to end before scaling to the full multi-object task.
+# Merged over the PickPlaceEnvConfig defaults (only overrides below are applied).
+pick_place:
+  env:
+    # Single target = fastest, clearest learning signal. Bump to 3-5 later.
+    num_spawned_objects: 1
+
+    # Grasp (hybrid: contact OR proximity). 0.06 m proximity is comfortably
+    # inside the tip's reach; 2 consecutive frames to latch.
+    grasp_distance_threshold: 0.06
+    grasp_consecutive_steps: 2
+    place_distance_threshold: 0.10
+
+    # Curriculum: skip the reach-only phase and enter the placing phase early
+    # so most of training optimises the full task.
+    curriculum_enabled: true
+    reach_only_steps: 0
+    reach_grasp_steps: 80000
+
+    # Dense shaping so the full reach->grasp->carry->place chain has a gradient.
+    reach_reward_scale: 1.0
+    grasp_bonus: 5.0
+    object_progress_reward_scale: 1.5
+    transport_reward_scale: 2.0
+    place_bonus: 15.0
+    drop_penalty: 3.0
+
+    # Keep sim2real regularisers on, but light.
+    randomize_dynamics: true
+    add_observation_noise: true
+    action_smoothing_alpha: 0.45
+    max_action_delta_per_step: 0.25
+
+  training:
+    num_envs: 8
+    total_timesteps: 1500000
+    eval_freq: 20000
+    save_freq: 50000
+    learning_rate: 0.0003
+    n_steps: 1024
+    batch_size: 256
+
+  # Pick the same single object each reset, spawned at a random reachable spot.
+  active_task: task1
+  tasks:
+    task1:
+      name: task1
+      active_object_index: 0
+      randomize_object_position: true

@@ -32,6 +32,14 @@ class PickPlaceEnvConfig(BaseConfig):
         default="place_zone", description="Name of place zone site"
     )
 
+    # Number of objects placed on the desk each reset (the rest are parked off
+    # the workspace). Fewer objects = less "nearest-cube" target thrashing and
+    # easier early learning; set to 1 to validate the pipeline end to end.
+    num_spawned_objects: int = Field(
+        default=5,
+        description="How many objects to spawn on the desk per episode (clamped to available bodies)",
+    )
+
     # Object names (must match XML)
     object_names: List[str] = Field(
         default=["obj_cube", "obj_cylinder", "obj_bar", "obj_cube_purple", "obj_cube_yellow",
@@ -54,12 +62,22 @@ class PickPlaceEnvConfig(BaseConfig):
         description="Names of weld equality constraints for grasping",
     )
 
-    # Grasping parameters
+    # Grasping parameters (hybrid trigger: real tip contact OR close proximity)
     grasp_distance_threshold: float = Field(
-        default=0.10, description="Distance threshold for grasping (meters) - increased for easier learning"
+        default=0.05,
+        description="Proximity grasp-trigger distance (m). Primary grasp sensitivity knob: the "
+        "tip latches the object when its centre is within this distance, or on real contact.",
+    )
+    grasp_contact_force_threshold: float = Field(
+        default=1e-3,
+        description="Minimum tip-object normal force (N) that counts as real contact for a grasp trigger.",
     )
     grasp_consecutive_steps: int = Field(
-        default=2, description="Consecutive steps within threshold to trigger grasp"
+        default=2, description="Consecutive steps with a grasp signal required to latch a grasp"
+    )
+    grasp_release_grace_steps: int = Field(
+        default=2,
+        description="Steps without a contact/proximity signal before an unassisted grasp is released",
     )
     place_distance_threshold: float = Field(
         default=0.10, description="Distance threshold for successful placement (meters)"
@@ -88,12 +106,17 @@ class PickPlaceEnvConfig(BaseConfig):
         default=0.0, description="Scale for second-order action change penalty"
     )
     object_progress_reward_scale: float = Field(
-        default=0.0,
-        description="Reward scale for object progress toward the place zone",
+        default=1.0,
+        description="Potential-based reward scale for a grasped object's progress toward the "
+        "place zone (dense signal that makes the full place task learnable).",
     )
     stable_contact_bonus_scale: float = Field(
         default=0.0,
         description="Small bonus scale for maintaining close tip/object contact",
+    )
+    grasp_proximity_bonus_scale: float = Field(
+        default=0.25,
+        description="Shaping bonus scale for settling the tip into grasp range before it latches",
     )
     # Assisted Grasping (Magnetic-like grip)
     assisted_grasp_enabled: bool = Field(
@@ -132,13 +155,16 @@ class PickPlaceEnvConfig(BaseConfig):
         description="Include active object linear velocity estimate in observation",
     )
 
-    # Object spawn bounds (where objects can be randomly placed on desk)
+    # Object spawn bounds (where objects can be randomly placed on desk).
+    # NOTE: the tendon tip's reachable workspace is an annulus of radius
+    # ~0.075-0.13 m around the base; spawns outside it can never be reached or
+    # grasped. Keep the box corners (|x|,|y|) within ~0.13 m radius.
     object_spawn_bounds_min: List[float] = Field(
-        default=[-0.1, -0.1, -0.025],
+        default=[-0.09, -0.09, 0.0],
         description="Minimum XYZ bounds for object spawning",
     )
     object_spawn_bounds_max: List[float] = Field(
-        default=[0.1, 0.1, -0.025],
+        default=[0.09, 0.09, 0.0],
         description="Maximum XYZ bounds for object spawning",
     )
 

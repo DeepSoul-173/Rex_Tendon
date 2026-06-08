@@ -763,6 +763,117 @@ def evaluate(
         console.print(f"Place rate: {place_count / n * 100:.1f}%")
 
 
+@app.command(name="eval-curve")
+def eval_curve(
+    model_path: str = typer.Argument(..., help="Trained model .zip (e.g. final_model.zip)"),
+    config: Optional[str] = typer.Option(
+        "rex_tendon/configs/pick_place_multi.yaml", "--config", help="Env/task config"
+    ),
+    counts: str = typer.Option("2,3,4,5", "--counts", help="Comma-separated object counts"),
+    episodes: int = typer.Option(100, "--episodes", help="Held-out episodes per count"),
+    seed_base: int = typer.Option(
+        1_000_000, "--seed-base", help="Held-out seed offset (disjoint from training)"
+    ),
+    output: Optional[str] = typer.Option(None, "--output", help="CSV output path"),
+) -> None:
+    """Held-out generalization eval: final policy x fixed object count -> CSV.
+
+    Runs the deterministic policy at each fixed object count on held-out seeds and
+    writes grasp/place/collision/occlusion rates + mean episode length per count.
+    This is the clean curve for thesis/paper figures (vs the noisier on-policy
+    curriculum tags logged during training).
+    """
+    import csv
+
+    mp_path = Path(model_path)
+    if not mp_path.exists():
+        console.print(f"[red]Model not found: {mp_path}[/red]")
+        raise typer.Exit(1)
+    model = PPO.load(str(mp_path))
+    pp_config = load_pick_place_config(config)
+    count_list = [int(c) for c in str(counts).split(",")]
+
+    def make_env(n: int) -> TentaclePickPlaceEnv:
+        env_cfg = pp_config.env.model_copy(deep=True)
+        env_cfg.object_curriculum_enabled = False
+        env_cfg.curriculum_enabled = False  # always evaluate in the FULL phase
+        env_cfg.num_spawned_objects = n
+        return TentaclePickPlaceEnv(
+            config=env_cfg, task_config=get_active_task(pp_config)
+        )
+
+    # Load the policy's observation normalisation (count-independent).
+    def normalize(obs):
+        return obs
+
+    stats_env = None
+    for d in (mp_path.parent, mp_path.parent.parent):
+        if (d / "vecnormalize.pkl").exists():
+            stats_env = VecNormalize.load(
+                str(d / "vecnormalize.pkl"),
+                DummyVecEnv([lambda: make_env(count_list[0])]),
+            )
+            stats_env.training = False
+            normalize = stats_env.normalize_obs
+            break
+    if stats_env is None:
+        console.print("[yellow]No vecnormalize.pkl found; using raw observations.[/yellow]")
+
+    console.print(
+        f"[bold]Held-out generalization eval[/bold] ({episodes} eps/count, "
+        f"seeds {seed_base}+):"
+    )
+    rows = []
+    for n in count_list:
+        env = make_env(n)
+        place = grasp = coll = occ = 0
+        lengths = []
+        for ep in range(episodes):
+            obs, _ = env.reset(seed=seed_base + ep)
+            done, steps = False, 0
+            ep_place = ep_grasp = ep_coll = ep_occ = False
+            while not done:
+                action, _ = model.predict(normalize(obs), deterministic=True)
+                obs, _r, term, trunc, info = env.step(action)
+                done = bool(term or trunc)
+                steps += 1
+                ep_place = ep_place or bool(info.get("place_success", False))
+                ep_grasp = ep_grasp or bool(info.get("is_grasped", False))
+                ep_coll = ep_coll or bool(info.get("episode_collision", False))
+                ep_occ = bool(info.get("occluded", False))
+            place += int(ep_place)
+            grasp += int(ep_place or ep_grasp)
+            coll += int(ep_coll)
+            occ += int(ep_occ)
+            lengths.append(steps)
+        env.close()
+        row = {
+            "num_objects": n,
+            "episodes": episodes,
+            "grasp_success_rate": round(100.0 * grasp / episodes, 2),
+            "place_success_rate": round(100.0 * place / episodes, 2),
+            "collision_rate": round(100.0 * coll / episodes, 2),
+            "occlusion_rate": round(100.0 * occ / episodes, 2),
+            "mean_episode_length": round(float(np.mean(lengths)), 1),
+        }
+        rows.append(row)
+        console.print(
+            f"  {n} obj: place={row['place_success_rate']}%  "
+            f"grasp={row['grasp_success_rate']}%  "
+            f"collision={row['collision_rate']}%  "
+            f"occ={row['occlusion_rate']}%  eplen={row['mean_episode_length']}"
+        )
+
+    if stats_env is not None:
+        stats_env.close()
+    out = Path(output) if output else mp_path.parent / "generalization_curve.csv"
+    with open(out, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    console.print(f"[bold green]Saved generalization curve -> {out}[/bold green]")
+
+
 if __name__ == "__main__":
     app()
 

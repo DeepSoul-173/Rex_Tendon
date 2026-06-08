@@ -12,9 +12,11 @@ import numpy as np
 from gymnasium import spaces
 from gymnasium.core import RenderFrame
 
-from ...common.constants import MOTOR_NAMES
 from ...configs.pick_place_config import PickPlaceEnvConfig
-from ...control.geometry import convert_2d_cursor_to_target_lengths
+from ...control.geometry import (
+    convert_2d_cursor_to_target_lengths,
+    convert_4d_cursor_to_target_lengths,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +92,15 @@ class TentaclePickPlaceEnv(gym.Env):
         self.model = mujoco.MjModel.from_xml_path(xml_file)
         self.data = mujoco.MjData(self.model)
         mujoco.mj_forward(self.model, self.data)
+
+        # Detect the continuum-arm DOF from the model: 3 tendon actuators per
+        # section (1 section = 2-DOF bend, 2 sections = 4-DOF S-curve). An extra
+        # base-yaw (joint) actuator may exist and is held at 0 during RL.
+        self.num_tendon_actuators = int(
+            np.sum(self.model.actuator_trntype == mujoco.mjtTrn.mjTRN_TENDON)
+        ) or int(self.model.nu)
+        self.num_sections = max(1, self.num_tendon_actuators // 3)
+        self.action_dim = 2 * self.num_sections
 
         # Time parameters
         self.simulation_length_seconds = self.config.simulation_length_seconds
@@ -265,10 +276,12 @@ class TentaclePickPlaceEnv(gym.Env):
         # State tracking
         self._elapsed_steps = 0
         self.current_position = None
-        self.previous_action = np.zeros(2, dtype=np.float32)
-        self.previous_previous_action = np.zeros(2, dtype=np.float32)
+        self.previous_action = np.zeros(self.action_dim, dtype=np.float32)
+        self.previous_previous_action = np.zeros(self.action_dim, dtype=np.float32)
         self.previous_object_position = np.zeros(3, dtype=np.float32)
-        self.calibrated_tendon_lengths = {name: 0.0 for name in MOTOR_NAMES}
+        self.calibrated_tendon_lengths = np.zeros(
+            self.num_tendon_actuators, dtype=np.float32
+        )
 
         # Grasping state
         self.is_grasped = False
@@ -292,29 +305,25 @@ class TentaclePickPlaceEnv(gym.Env):
             self.renderer = None
         self.viewer = None
 
-        # Action space: 2D cursor
+        # Action space: one 2D cursor per section (2 DOF per section). Only the
+        # tendon actuators are RL-controlled; an extra base-yaw (joint) actuator,
+        # if present, is held at 0 so it stays dormant during RL.
         self.action_space = spaces.Box(
             low=-self.max_2d_action_magnitude,
             high=self.max_2d_action_magnitude,
-            shape=(2,),
+            shape=(self.action_dim,),
             dtype=np.float32,
         )
-        self.action_dim = 2
-
-        # Actuator ranges
-        # Only the 3 tendon actuators are RL-controlled. A 4th actuator (base
-        # yaw) may exist in the model for teleoperation; it is held at 0 here so
-        # the RL task stays a clean 2-DOF bend problem with a 3-tendon obs.
         actuator_ctrlrange = self.model.actuator_ctrlrange
-        self.num_tendon_actuators = 3
         self.actuator_low = actuator_ctrlrange[: self.num_tendon_actuators, 0]
         self.actuator_high = actuator_ctrlrange[: self.num_tendon_actuators, 1]
 
-        # Observation space
-        # tip_pos(3) + obj_pos(3) + place_pos(3) + grasp_state(1) + prev_action(2) = 12
-        single_frame_dim = 12
+        # Observation space:
+        #   tip(3)+obj(3)+place(3)+grasp(1)+prev_action(action_dim) per frame,
+        #   plus optional tendon lengths / relative vectors / object velocity.
+        single_frame_dim = 10 + self.action_dim
         if self.include_actuator_lengths_in_obs:
-            single_frame_dim += 3  # actuator lengths
+            single_frame_dim += self.num_tendon_actuators  # tendon lengths
         if self.include_relative_observations:
             single_frame_dim += 6  # tip-object and object-place vectors
         if self.include_object_velocity_in_obs:
@@ -706,30 +715,28 @@ class TentaclePickPlaceEnv(gym.Env):
                 np.array(task.object_position, dtype=np.float32),
             )
 
-        # Randomize initial actuator positions
+        # Randomize initial actuator positions (per tendon), clipped to range.
+        n_tendon = self.num_tendon_actuators
         if (
             isinstance(self.initial_actuator_config, tuple)
             and len(self.initial_actuator_config) == 2
         ):
             min_val, max_val = self.initial_actuator_config
             initial_positions = self.np_random.uniform(
-                low=min_val, high=max_val, size=3
+                low=min_val, high=max_val, size=n_tendon
             ).astype(np.float32)
         elif isinstance(self.initial_actuator_config, (float, int)):
             initial_positions = np.full(
-                3, float(self.initial_actuator_config), dtype=np.float32
+                n_tendon, float(self.initial_actuator_config), dtype=np.float32
             )
         else:
-            initial_positions = np.full(3, 0.23, dtype=np.float32)
+            initial_positions = np.full(n_tendon, 0.23, dtype=np.float32)
 
         initial_positions = np.clip(
-            initial_positions, self.actuator_low[:3], self.actuator_high[:3]
+            initial_positions, self.actuator_low, self.actuator_high
         )
 
-        self.calibrated_tendon_lengths = {
-            name: initial_positions[i] for i, name in enumerate(MOTOR_NAMES)
-        }
-
+        self.calibrated_tendon_lengths = initial_positions.copy()
         self.current_position = initial_positions.copy()
         self.data.ctrl[: self.num_tendon_actuators] = self.current_position
         self.previous_action = np.zeros(self.action_dim, dtype=np.float32)
@@ -785,17 +792,26 @@ class TentaclePickPlaceEnv(gym.Env):
             prev_obj_pos - self._get_place_zone_position()
         )
 
-        # Convert 2D cursor to 3 tendon lengths
-        baseline_lengths = np.array(
-            [self.calibrated_tendon_lengths[m] for m in MOTOR_NAMES], dtype=np.float32
+        # Convert the cursor action to tendon lengths (2D->3 per section).
+        baseline_lengths = np.asarray(
+            self.calibrated_tendon_lengths, dtype=np.float32
         )
-        new_tendon_lengths = convert_2d_cursor_to_target_lengths(
-            action,
-            baseline_lengths,
-            self.actuator_low,
-            self.actuator_high,
-            self.max_2d_action_magnitude,
-        )
+        if self.num_sections >= 2:
+            new_tendon_lengths = convert_4d_cursor_to_target_lengths(
+                action,
+                baseline_lengths,
+                self.actuator_low,
+                self.actuator_high,
+                self.max_2d_action_magnitude,
+            )
+        else:
+            new_tendon_lengths = convert_2d_cursor_to_target_lengths(
+                action,
+                baseline_lengths,
+                self.actuator_low,
+                self.actuator_high,
+                self.max_2d_action_magnitude,
+            )
 
         # Apply controls (tendons only; base-yaw actuator stays at 0 for RL)
         self.data.ctrl[: self.num_tendon_actuators] = new_tendon_lengths

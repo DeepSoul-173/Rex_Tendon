@@ -295,6 +295,18 @@ class TentaclePickPlaceEnv(gym.Env):
         self.grasp_local_offset = np.zeros(3, dtype=np.float32)
         self.grasp_local_rot = np.eye(3, dtype=np.float32)
 
+        # Stacking task state (Stage B). Cube height inferred from object 0.
+        self._stacking = False
+        self._stack_count = 0
+        self._num_placed = 0
+        self._stack_source_xy = np.zeros(2, dtype=np.float32)
+        self._stack_target_xy = np.zeros(2, dtype=np.float32)
+        self._stack_cube_height = 2.0 * max(
+            float(self.object_rest_z[0]) - self.table_surface_z - OBJECT_SPAWN_CLEARANCE,
+            0.005,
+        )
+        self._stack_toppled = False
+
         # Renderer
         self.image_size = (84, 84)
         if self.render_mode == "rgb_array":
@@ -659,6 +671,59 @@ class TentaclePickPlaceEnv(gym.Env):
                 # Reset velocity
                 self.data.qvel[qvel_adr : qvel_adr + 6] = 0
 
+    # ===== Stacking task (Stage B) =====
+    def _stacking_slot_position(self, slot: int) -> np.ndarray:
+        """Centre of the ``slot``-th cube in the TARGET stack (slot 0 = bottom)."""
+        h = self._stack_cube_height
+        z = self.table_surface_z + 0.5 * h + OBJECT_SPAWN_CLEARANCE + slot * h
+        return np.array(
+            [self._stack_target_xy[0], self._stack_target_xy[1], z], dtype=np.float32
+        )
+
+    def _stacking_source_position(self, level: int) -> np.ndarray:
+        """Centre of the ``level``-th cube in the SOURCE stack (level 0 = bottom)."""
+        h = self._stack_cube_height
+        z = self.table_surface_z + 0.5 * h + OBJECT_SPAWN_CLEARANCE + level * h
+        return np.array(
+            [self._stack_source_xy[0], self._stack_source_xy[1], z], dtype=np.float32
+        )
+
+    def _spawn_source_stack(self) -> None:
+        """Stack the first ``_stack_count`` cubes at the source; park the rest."""
+        for i, body_id in enumerate(self.object_body_ids):
+            jnt_adr = self.model.body_jntadr[body_id]
+            if jnt_adr < 0:
+                continue
+            qpos_adr = self.model.jnt_qposadr[jnt_adr]
+            qvel_adr = self.model.jnt_dofadr[jnt_adr]
+            if i < self._stack_count:
+                self.data.qpos[qpos_adr : qpos_adr + 3] = self._stacking_source_position(i)
+            else:
+                self.data.qpos[qpos_adr : qpos_adr + 3] = [
+                    10.0 + 0.1 * i,
+                    10.0,
+                    float(self.object_rest_z[i]),
+                ]
+            self.data.qpos[qpos_adr + 3 : qpos_adr + 7] = [1, 0, 0, 0]
+            self.data.qvel[qvel_adr : qvel_adr + 6] = 0
+
+    def _stacking_active_idx(self) -> int:
+        """Source cube currently being moved: top of the remaining source stack."""
+        return max(0, self._stack_count - 1 - self._num_placed)
+
+    def _stacking_check_toppled(self) -> bool:
+        """True if any already-placed target cube has drifted off its slot."""
+        for placed in range(self._num_placed):
+            idx = self._stack_count - 1 - placed  # body that was placed at slot `placed`
+            pos = self._get_object_position(idx)
+            slot = self._stacking_slot_position(placed)
+            if (
+                np.linalg.norm(pos[:2] - slot[:2]) > 0.5 * self._stack_cube_height + 0.01
+                or pos[2] < slot[2] - 0.5 * self._stack_cube_height
+            ):
+                return True
+        return False
+
     def reset(
         self,
         *,
@@ -692,28 +757,41 @@ class TentaclePickPlaceEnv(gym.Env):
             self._randomize_dynamic_parameters()
 
         task = self.task_config
-        if task and task.place_position is not None:
-            self._set_place_zone_position(
-                np.array(task.place_position, dtype=np.float32)
-            )
-
-        # Select object to pick (only from the spawned-on-desk subset)
-        num_on_desk = self._episode_num_objects
-        if task and task.active_object_index is not None:
-            self.active_object_idx = int(
-                np.clip(task.active_object_index, 0, num_on_desk - 1)
-            )
+        self._stacking = bool(task and getattr(task, "stacking", False))
+        if self._stacking:
+            # Stacking task: spawn a source stack, target the first (bottom) slot.
+            self._stack_count = int(min(task.stack_count, len(self.object_body_ids)))
+            self._episode_num_objects = self._stack_count
+            self._num_placed = 0
+            self._stack_toppled = False
+            self._stack_source_xy = np.array(task.source_xy, dtype=np.float32)
+            self._stack_target_xy = np.array(task.target_xy, dtype=np.float32)
+            self._spawn_source_stack()
+            self.active_object_idx = self._stacking_active_idx()
+            self._set_place_zone_position(self._stacking_slot_position(0))
         else:
-            self.active_object_idx = self.np_random.integers(0, num_on_desk)
+            if task and task.place_position is not None:
+                self._set_place_zone_position(
+                    np.array(task.place_position, dtype=np.float32)
+                )
 
-        # Randomize or set object positions
-        if task is None or task.randomize_object_position:
-            self._randomize_object_positions()
-        if task and task.object_position is not None:
-            self._set_object_position(
-                self.active_object_idx,
-                np.array(task.object_position, dtype=np.float32),
-            )
+            # Select object to pick (only from the spawned-on-desk subset)
+            num_on_desk = self._episode_num_objects
+            if task and task.active_object_index is not None:
+                self.active_object_idx = int(
+                    np.clip(task.active_object_index, 0, num_on_desk - 1)
+                )
+            else:
+                self.active_object_idx = self.np_random.integers(0, num_on_desk)
+
+            # Randomize or set object positions
+            if task is None or task.randomize_object_position:
+                self._randomize_object_positions()
+            if task and task.object_position is not None:
+                self._set_object_position(
+                    self.active_object_idx,
+                    np.array(task.object_position, dtype=np.float32),
+                )
 
         # Randomize initial actuator positions (per tendon), clipped to range.
         n_tendon = self.num_tendon_actuators
@@ -846,6 +924,11 @@ class TentaclePickPlaceEnv(gym.Env):
         tip_pos = self._get_tip_position()
         place_pos = self._get_place_zone_position()
 
+        # Stacking: the active cube is fixed to the source-stack top (not nearest),
+        # and the place target is the current (rising) target slot (synced as a site).
+        if self._stacking:
+            self.active_object_idx = self._stacking_active_idx()
+
         # Find the closest cube to the tip
         min_dist = float("inf")
         closest_obj_pos = None
@@ -867,8 +950,8 @@ class TentaclePickPlaceEnv(gym.Env):
             min_dist = np.linalg.norm(tip_pos - closest_obj_pos)
             closest_idx = self.active_object_idx
 
-        # If not grasped, set active object to closest
-        if not self.is_grasped:
+        # If not grasped, set active object to closest (single/multi pick-place only)
+        if not self.is_grasped and not self._stacking:
             self.active_object_idx = closest_idx
 
         obj_pos = self._get_object_position(self.active_object_idx)
@@ -934,12 +1017,33 @@ class TentaclePickPlaceEnv(gym.Env):
                 was_dropped = True
 
         obj_on_table_or_above = obj_pos[2] >= self.object_rest_z[self.active_object_idx] - 0.005
-        self.place_success = (
-            phase >= PickPlacePhase.FULL
-            and self.is_grasped
-            and obj_to_place <= self.place_distance_threshold
-            and obj_on_table_or_above
-        )
+        placed_this_step = False
+        if self._stacking:
+            # Place the carried cube onto the current target slot when close enough.
+            if (
+                self.is_grasped
+                and obj_to_place <= self.place_distance_threshold
+                and phase >= PickPlacePhase.FULL
+            ):
+                self._set_object_position(self.active_object_idx, place_pos)
+                self._deactivate_grasp(self.active_object_idx)
+                self._num_placed += 1
+                placed_this_step = True
+                # Advance the target site to the next (higher) slot.
+                self._set_place_zone_position(
+                    self._stacking_slot_position(self._num_placed)
+                )
+            self._stack_toppled = self._stacking_check_toppled()
+            self.place_success = (
+                self._num_placed >= self._stack_count and not self._stack_toppled
+            )
+        else:
+            self.place_success = (
+                phase >= PickPlacePhase.FULL
+                and self.is_grasped
+                and obj_to_place <= self.place_distance_threshold
+                and obj_on_table_or_above
+            )
 
         # ===== REWARD CALCULATION =====
         reward = -self.reach_reward_scale * tip_to_obj
@@ -964,8 +1068,14 @@ class TentaclePickPlaceEnv(gym.Env):
         if was_dropped:
             reward -= self.drop_penalty
 
+        if self._stacking:
+            if placed_this_step:
+                reward += self.place_bonus  # per-cube placement
+            if self._stack_toppled:
+                reward -= self.drop_penalty  # knocked the target stack over
+
         if self.place_success:
-            reward += self.place_bonus
+            reward += self.place_bonus  # full stack complete (or single place)
 
         # Per-step living cost: makes finishing (placing) preferable to hovering.
         reward -= self.time_penalty
@@ -1005,6 +1115,12 @@ class TentaclePickPlaceEnv(gym.Env):
         info["is_grasped"] = self.is_grasped
         info["was_dropped"] = was_dropped
         info["place_success"] = self.place_success
+        # Stacking task metrics
+        info["stacking"] = self._stacking
+        info["num_placed"] = self._num_placed
+        info["stack_count"] = self._stack_count
+        info["stack_toppled"] = self._stack_toppled
+        info["cubes_placed_this_step"] = placed_this_step
         # Multi-object curriculum metrics
         info["num_objects"] = self._episode_num_objects
         info["collision"] = collision

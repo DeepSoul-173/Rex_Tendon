@@ -251,6 +251,20 @@ class PickPlaceTaskConfig(BaseConfig):
         default=True, description="Randomize object positions on reset"
     )
 
+    # --- Stacking task (Stage B): pick a source stack apart and rebuild it ---
+    stacking: bool = Field(
+        default=False, description="Enable the stacking task (vs single place)"
+    )
+    stack_count: int = Field(
+        default=2, description="Number of cubes to stack (curriculum-controlled)"
+    )
+    source_xy: Optional[Tuple[float, float]] = Field(
+        default=(0.08, 0.0), description="XY of the source stack the cubes start in"
+    )
+    target_xy: Optional[Tuple[float, float]] = Field(
+        default=(-0.08, 0.0), description="XY of the target stack to build"
+    )
+
 
 class PickPlaceTrainingConfig(BaseConfig):
     """Configuration for pick-and-place RL training parameters."""

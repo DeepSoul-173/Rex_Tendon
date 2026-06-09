@@ -760,7 +760,13 @@ class TentaclePickPlaceEnv(gym.Env):
         self._stacking = bool(task and getattr(task, "stacking", False))
         if self._stacking:
             # Stacking task: spawn a source stack, target the first (bottom) slot.
-            self._stack_count = int(min(task.stack_count, len(self.object_body_ids)))
+            # The stack height follows the shared curriculum level when enabled
+            # (reusing the multi-object curriculum: 2 -> 3 -> 4), else task.stack_count.
+            if self.object_curriculum_enabled:
+                target_n = self._current_num_objects()
+            else:
+                target_n = task.stack_count
+            self._stack_count = int(min(target_n, len(self.object_body_ids)))
             self._episode_num_objects = self._stack_count
             self._num_placed = 0
             self._stack_toppled = False

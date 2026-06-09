@@ -1,0 +1,60 @@
+# Stage B stacking curriculum: 2-section (4-DOF) arm rebuilds a source stack at a
+# target location, ramping stack height 2 -> 3 -> 4 as it masters each level
+# (reuses the multi-object curriculum: stack_count follows the shared level).
+pick_place:
+  env:
+    xml_file: "rex_assets/rex_simulation/pick_and_place_scene_2section.xml"
+    # 4-DOF arm tendons are 0.06-0.17; start near rest (slightly slack).
+    initial_actuator_position: [0.13, 0.17]
+    simulation_length_seconds: 20.0   # multiple cubes per episode
+
+    # Stacking height curriculum 2 -> 4 (bumps when place_success > 90%).
+    object_curriculum_enabled: true
+    min_spawned_objects: 2
+    max_spawned_objects: 4
+
+    # Grasp: the 4-DOF arm reaches the table (z~0.01), so a near-contact grasp is
+    # feasible here (unlike the 1-section arm). Snap the cube to the fingertip.
+    grasp_distance_threshold: 0.035
+    grasp_consecutive_steps: 2
+    grasp_carry_offset: 0.015
+    place_distance_threshold: 0.05    # stacking needs placement accuracy
+
+    # Reach/grasp phase transfers fast; enter placing early.
+    curriculum_enabled: true
+    reach_only_steps: 0
+    reach_grasp_steps: 100000
+
+    # Non-farmable reward (Stage A recipe): progress-to-slot + per-cube place
+    # bonus + completion bonus + living cost; no per-step lift reward.
+    reach_reward_scale: 1.0
+    grasp_bonus: 5.0
+    object_progress_reward_scale: 3.0
+    transport_reward_scale: 0.0
+    place_bonus: 15.0
+    drop_penalty: 3.0
+    time_penalty: 0.05
+
+    randomize_dynamics: true
+    add_observation_noise: true
+    action_smoothing_alpha: 0.45
+    max_action_delta_per_step: 0.25
+
+  training:
+    num_envs: 12
+    total_timesteps: 12000000
+    eval_freq: 40000
+    save_freq: 200000
+    learning_rate: 0.0003
+    n_steps: 1024
+    batch_size: 256
+    log_dir_base: "rex_results/pick_place_stack"
+
+  active_task: stack
+  tasks:
+    stack:
+      name: stack
+      stacking: true
+      stack_count: 2
+      source_xy: [0.08, 0.0]
+      target_xy: [-0.08, 0.0]

@@ -139,6 +139,12 @@ class PickPlaceEnvConfig(BaseConfig):
         description="Potential-based reward scale for a grasped object's progress toward the "
         "place zone (dense signal that makes the full place task learnable).",
     )
+    carry_reach_reward_scale: float = Field(
+        default=0.0,
+        description="Carry-phase analog of the reach reward: while grasped, penalize the "
+        "tip's distance to the place target (-scale * tip_to_place). Fills the gradient "
+        "dead zone after grasping, when tip_to_obj is ~0 and the reach term goes flat.",
+    )
     stable_contact_bonus_scale: float = Field(
         default=0.0,
         description="Small bonus scale for maintaining close tip/object contact",

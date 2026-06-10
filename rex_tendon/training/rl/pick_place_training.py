@@ -198,7 +198,16 @@ class MultiObjectCurriculumCallback(BaseCallback):
             placed = bool(info.get("place_success", False))
             self.place[n].append(1.0 if placed else 0.0)
             self.grasp[n].append(
-                1.0 if (placed or info.get("is_grasped", False)) else 0.0
+                # ever-grasped is the honest signal: is_grasped is False at
+                # episode end whenever the cube was placed (grasp released).
+                1.0
+                if (
+                    placed
+                    or info.get(
+                        "episode_ever_grasped", info.get("is_grasped", False)
+                    )
+                )
+                else 0.0
             )
             self.eplen[n].append(float(info["episode"].get("l", 0)))
             self.collision.append(1.0 if info.get("episode_collision", False) else 0.0)

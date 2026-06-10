@@ -149,6 +149,7 @@ class TentaclePickPlaceEnv(gym.Env):
         self.action_change_penalty_scale = self.config.action_change_penalty_scale
         self.action_jerk_penalty_scale = self.config.action_jerk_penalty_scale
         self.object_progress_reward_scale = self.config.object_progress_reward_scale
+        self.carry_reach_reward_scale = self.config.carry_reach_reward_scale
         self.stable_contact_bonus_scale = self.config.stable_contact_bonus_scale
         self.grasp_proximity_bonus_scale = self.config.grasp_proximity_bonus_scale
         self.assisted_grasp_enabled = self.config.assisted_grasp_enabled
@@ -181,6 +182,7 @@ class TentaclePickPlaceEnv(gym.Env):
         self._episode_num_objects = self.num_spawned_objects
         self._episode_collision = False
         self._episode_occluded = False
+        self._episode_ever_grasped = False
 
         # MuJoCo IDs
         self.tip_site_id = mujoco.mj_name2id(
@@ -272,6 +274,9 @@ class TentaclePickPlaceEnv(gym.Env):
             ],
             dtype=np.float32,
         )
+        # Per-episode lift baseline; overwritten at reset with actual spawn
+        # heights (stacked cubes spawn above their table-rest height).
+        self._object_spawn_z = self.object_rest_z.astype(np.float64).copy()
 
         # State tracking
         self._elapsed_steps = 0
@@ -748,6 +753,7 @@ class TentaclePickPlaceEnv(gym.Env):
         self._episode_num_objects = self._current_num_objects()
         self._episode_collision = False
         self._episode_occluded = False
+        self._episode_ever_grasped = False
 
         # Deactivate all grasp constraints
         self._deactivate_all_grasps()
@@ -838,8 +844,23 @@ class TentaclePickPlaceEnv(gym.Env):
             self.active_object_idx
         ).copy()
 
+        # Per-episode lift baseline: stacked cubes spawn above their table-rest
+        # height, so lift must be measured from the spawn position, not rest
+        # (otherwise the top of a 2-stack counts as "lifted" at spawn).
+        self._object_spawn_z = np.array(
+            [
+                float(self._get_object_position(i)[2])
+                for i in range(len(self.object_body_ids))
+            ],
+            dtype=np.float64,
+        )
+
         # Target-clutter / occlusion proxy for this episode's spawn layout.
-        self._episode_occluded = self._compute_occlusion()
+        # Meaningless for stacking: stack-mates share the same xy by design,
+        # so the proxy would read 100% occluded on every episode.
+        self._episode_occluded = (
+            False if self._stacking else self._compute_occlusion()
+        )
 
         # Fill observation buffer
         raw_obs = self._get_current_raw_obs()
@@ -871,6 +892,7 @@ class TentaclePickPlaceEnv(gym.Env):
                     + delta / delta_norm * self.max_action_delta_per_step
                 ).astype(np.float32)
 
+        prev_active_idx = self.active_object_idx
         prev_obj_pos = self._get_object_position(self.active_object_idx)
         prev_obj_to_place = np.linalg.norm(
             prev_obj_pos - self._get_place_zone_position()
@@ -976,6 +998,10 @@ class TentaclePickPlaceEnv(gym.Env):
         obj_to_place = np.linalg.norm(obj_pos - place_pos)
         tip_to_place = np.linalg.norm(tip_pos - place_pos)
         object_progress = prev_obj_to_place - obj_to_place
+        if self.active_object_idx != prev_active_idx:
+            # Active cube switched mid-step (after a placement / retarget): the
+            # two distances refer to different cubes or slots — no real motion.
+            object_progress = 0.0
 
         # Get curriculum phase
         phase = self._get_curriculum_phase()
@@ -990,7 +1016,11 @@ class TentaclePickPlaceEnv(gym.Env):
         self._episode_collision = self._episode_collision or collision
         within_grasp_proximity = tip_to_obj <= self.grasp_distance_threshold
         grasp_signal = has_tip_object_contact or within_grasp_proximity
-        lift_height = max(0.0, float(obj_pos[2] - self.object_rest_z[self.active_object_idx]))
+        lift_base = max(
+            float(self.object_rest_z[self.active_object_idx]),
+            float(self._object_spawn_z[self.active_object_idx]),
+        )
+        lift_height = max(0.0, float(obj_pos[2]) - lift_base)
         is_lifted = lift_height >= LIFT_SUCCESS_HEIGHT
 
         # Track real contact separately from the (looser) grasp signal so the
@@ -1021,6 +1051,9 @@ class TentaclePickPlaceEnv(gym.Env):
             if obj_pos[2] < self.table_surface_z - 0.02:
                 self._deactivate_grasp(self.active_object_idx)
                 was_dropped = True
+
+        if self.is_grasped:
+            self._episode_ever_grasped = True
 
         obj_on_table_or_above = obj_pos[2] >= self.object_rest_z[self.active_object_idx] - 0.005
         placed_this_step = False
@@ -1071,6 +1104,14 @@ class TentaclePickPlaceEnv(gym.Env):
             reward += self.object_progress_reward_scale * object_progress
             reward += self.transport_reward_scale * lift_height
 
+        if self.is_grasped:
+            # Carry-phase reach analog: once grasped, tip_to_obj is ~0 and the
+            # reach term goes flat — without this the only pull toward the
+            # place target is the weak progress term, and policies converge to
+            # lift-and-hover (diagnosed on the 2026-06-10 stacking run: 0%
+            # place at 8M steps while the slot was reachable to 1.4 mm).
+            reward -= self.carry_reach_reward_scale * tip_to_place
+
         if was_dropped:
             reward -= self.drop_penalty
 
@@ -1119,6 +1160,7 @@ class TentaclePickPlaceEnv(gym.Env):
         info["object_lift_height"] = lift_height
         info["object_lifted"] = is_lifted
         info["is_grasped"] = self.is_grasped
+        info["episode_ever_grasped"] = self._episode_ever_grasped
         info["was_dropped"] = was_dropped
         info["place_success"] = self.place_success
         # Stacking task metrics

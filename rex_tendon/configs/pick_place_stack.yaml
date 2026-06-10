@@ -45,6 +45,13 @@ pick_place:
     place_bonus: 15.0
     drop_penalty: 3.0
     time_penalty: 0.05
+    # Carry-phase reach analog (added after the 8M run plateaued at 0% place):
+    # once grasped, tip_to_obj is ~0 and the reach term goes flat, so nothing
+    # pulled the tip toward the slot — the policy converged to lift-and-hover
+    # while a random probe reached the slot to 1.4 mm. While grasped:
+    # reward -= scale * tip_to_place. NOTE: makes ep_rew_mean read lower early
+    # on (hovering is now penalized) — judge runs by place_success, not reward.
+    carry_reach_reward_scale: 1.0
 
     randomize_dynamics: true
     add_observation_noise: true
@@ -59,9 +66,10 @@ pick_place:
     learning_rate: 0.0003
     n_steps: 1024
     batch_size: 256
-    # Lower than the 0.01 default: with a competent warm-started base policy the
-    # extra exploration entropy is what let the action std diverge to 8e4.
-    ent_coef: 0.005
+    # Below the 0.01 default (from-scratch runs diverged, std -> 8e4), but above
+    # the 0.005 that let std collapse 0.81 -> 0.16 by ~2.3M steps in the 8M run,
+    # locking in lift-and-hover before placing was ever found.
+    ent_coef: 0.0075
     log_dir_base: "rex_results/pick_place_stack"
 
   active_task: stack

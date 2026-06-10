@@ -41,7 +41,7 @@ requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.scripts]
-rex-tendon = "rex_tendon.cli:main"
+rex-tendon = "rex_tendon.__main__:main"
 
 [tool.black]
 line-length = 88
@@ -59,4 +59,7 @@ warn_unused_configs = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "-ra -q --strict-markers --cov=rex_tendon --cov-report=term-missing"
+# Coverage flags removed: pytest-cov is not installed in the project venv and
+# the flags made every bare `pytest` invocation fail. Re-add after
+# `poetry add --group dev pytest-cov` (post-training-run).
+addopts = "-ra -q --strict-markers"

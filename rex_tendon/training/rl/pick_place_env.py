@@ -150,6 +150,7 @@ class TentaclePickPlaceEnv(gym.Env):
         self.action_jerk_penalty_scale = self.config.action_jerk_penalty_scale
         self.object_progress_reward_scale = self.config.object_progress_reward_scale
         self.carry_reach_reward_scale = self.config.carry_reach_reward_scale
+        self.grasp_hold_bonus = self.config.grasp_hold_bonus
         self.grasp_requires_contact = self.config.grasp_requires_contact
         self.place_mode = self.config.place_mode
         self.place_settle_steps = int(self.config.place_settle_steps)
@@ -1152,11 +1153,13 @@ class TentaclePickPlaceEnv(gym.Env):
             reward += self.transport_reward_scale * lift_height
 
         if self.is_grasped:
-            # Carry-phase reach analog: once grasped, tip_to_obj is ~0 and the
-            # reach term goes flat — without this the only pull toward the
-            # place target is the weak progress term, and policies converge to
-            # lift-and-hover (diagnosed on the 2026-06-10 stacking run: 0%
-            # place at 8M steps while the slot was reachable to 1.4 mm).
+            # Holding must be worth more than hovering near the cube: with
+            # contact-gated grasping, an absolute carry penalty alone makes
+            # touching the cube a net-negative event and the policy learns to
+            # avoid contact entirely (grasp rate 10% -> 0% on the 2026-06-10
+            # retrain). Transport direction comes from the potential-based
+            # object_progress term, which cannot be farmed by holding still.
+            reward += self.grasp_hold_bonus
             reward -= self.carry_reach_reward_scale * tip_to_place
 
         if was_dropped:

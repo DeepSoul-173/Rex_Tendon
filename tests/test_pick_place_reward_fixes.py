@@ -99,6 +99,35 @@ def test_carry_reach_term_applies_only_when_grasped():
             env.close()
 
 
+def test_grasp_hold_bonus_applies_only_when_grasped():
+    # Grasped: reward difference between hold_bonus 0.15 and 0 is exactly 0.15.
+    rewards = {}
+    for bonus in (0.0, 0.15):
+        env = _stacking_env(grasp_hold_bonus=bonus)
+        try:
+            env.reset(seed=7)
+            env._activate_grasp(env.active_object_idx)
+            action = np.zeros(env.action_space.shape, dtype=np.float32)
+            _, rewards[bonus], _, _, info = env.step(action)
+            assert info["is_grasped"]
+        finally:
+            env.close()
+    assert rewards[0.15] - rewards[0.0] == pytest.approx(0.15, abs=1e-9)
+
+    # Not grasped: the bonus must not leak in.
+    rewards = {}
+    for bonus in (0.0, 0.15):
+        env = _stacking_env(grasp_hold_bonus=bonus)
+        try:
+            env.reset(seed=7)
+            action = np.zeros(env.action_space.shape, dtype=np.float32)
+            _, rewards[bonus], _, _, info = env.step(action)
+            assert not info["is_grasped"]
+        finally:
+            env.close()
+    assert rewards[0.15] == pytest.approx(rewards[0.0], abs=1e-9)
+
+
 def test_carry_reach_term_absent_when_not_grasped():
     envs = {k: _stacking_env(carry_scale=k) for k in (0.0, 1.0)}
     try:
@@ -132,8 +161,12 @@ def test_stack_config_loads_with_fix():
     from rex_tendon.training.rl.pick_place_training import load_pick_place_config
 
     cfg = load_pick_place_config("rex_tendon/configs/pick_place_stack.yaml")
-    assert cfg.env.carry_reach_reward_scale == 1.0
-    assert cfg.training.ent_coef == 0.0075
+    # Run-3 reward design: holding pays, transport is potential-based, no
+    # absolute carry penalty (run-2 lesson: it teaches contact avoidance).
+    assert cfg.env.carry_reach_reward_scale == 0.0
+    assert cfg.env.grasp_hold_bonus == 0.15
+    assert cfg.env.object_progress_reward_scale == 12.0
+    assert cfg.training.ent_coef == 0.005
     assert cfg.env.grasp_requires_contact is True
     assert cfg.env.place_mode == "release"
     assert cfg.env.place_distance_threshold == 0.03

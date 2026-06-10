@@ -45,20 +45,28 @@ pick_place:
 
     # Non-farmable reward (Stage A recipe): progress-to-slot + per-cube place
     # bonus + completion bonus + living cost; no per-step lift reward.
+    #
+    # Carry-phase design history (don't repeat these):
+    #  - Run 1 (8M, ent 0.005): progress x3 alone -> +0.48 total for the full
+    #    0.16 m transport; policy plateaued at lift-and-hover, 0% place.
+    #  - Run 2 (12M, ent 0.0075): absolute carry penalty (-1.0 * tip_to_place
+    #    while grasped) + contact-gated grasping -> touching the cube became
+    #    net-negative for a policy that can't place yet; grasp rate fell
+    #    10% -> 0%, std then blew up 0.16 -> 544. Avoidable state + absolute
+    #    in-state penalty = state avoidance.
+    #  - Run 3 (this config): holding pays (+0.15/step > the ~0.11/step max
+    #    proximity hover), transport gradient is potential-based and 4x
+    #    stronger (progress x12), finishing dominates holding forever
+    #    (place 20+20 per episode vs hold flow <= 0.15*250 = 37.5 minus time).
     reach_reward_scale: 1.0
     grasp_bonus: 5.0
-    object_progress_reward_scale: 3.0
+    grasp_hold_bonus: 0.15
+    object_progress_reward_scale: 12.0
     transport_reward_scale: 0.0
-    place_bonus: 15.0
+    place_bonus: 20.0
     drop_penalty: 3.0
     time_penalty: 0.05
-    # Carry-phase reach analog (added after the 8M run plateaued at 0% place):
-    # once grasped, tip_to_obj is ~0 and the reach term goes flat, so nothing
-    # pulled the tip toward the slot — the policy converged to lift-and-hover
-    # while a random probe reached the slot to 1.4 mm. While grasped:
-    # reward -= scale * tip_to_place. NOTE: makes ep_rew_mean read lower early
-    # on (hovering is now penalized) — judge runs by place_success, not reward.
-    carry_reach_reward_scale: 1.0
+    carry_reach_reward_scale: 0.0   # run-2 lesson: punishes grasping itself
 
     randomize_dynamics: true
     add_observation_noise: true
@@ -73,10 +81,10 @@ pick_place:
     learning_rate: 0.0003
     n_steps: 1024
     batch_size: 256
-    # Below the 0.01 default (from-scratch runs diverged, std -> 8e4), but above
-    # the 0.005 that let std collapse 0.81 -> 0.16 by ~2.3M steps in the 8M run,
-    # locking in lift-and-hover before placing was ever found.
-    ent_coef: 0.0075
+    # 0.0075 fed the run-2 std blowup (0.16 -> 544 once gradients flatlined).
+    # Back to 0.005: bootstrapping now relies on dense potential-based shaping,
+    # not exploration entropy.
+    ent_coef: 0.005
     log_dir_base: "rex_results/pick_place_stack"
 
   active_task: stack

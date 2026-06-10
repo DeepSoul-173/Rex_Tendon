@@ -145,6 +145,15 @@ class PickPlaceEnvConfig(BaseConfig):
         "tip's distance to the place target (-scale * tip_to_place). Fills the gradient "
         "dead zone after grasping, when tip_to_obj is ~0 and the reach term goes flat.",
     )
+    grasp_hold_bonus: float = Field(
+        default=0.0,
+        description="Per-step bonus while holding an object. With contact-gated "
+        "grasping, holding must pay more than hovering near the cube (the proximity "
+        "bonus), otherwise an absolute carry penalty teaches the policy to avoid "
+        "contact altogether — observed on the 2026-06-10 retrain (grasp rate "
+        "10% -> 0%). Keep it below place_bonus / episode_steps so finishing "
+        "still dominates holding forever.",
+    )
     # Grasp/place accuracy (trust of reported success)
     grasp_requires_contact: bool = Field(
         default=False,

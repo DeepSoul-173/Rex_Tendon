@@ -71,10 +71,31 @@ Modes:
         help="Control mode. Auto-detected: 'rl' if --model given, else 'direct'.",
     )
     parser.add_argument(
+        "--filter",
+        choices=["one-euro", "ema"],
+        default="one-euro",
+        help="Cursor filter: 'one-euro' = adaptive (calm at rest, direct in "
+        "motion); 'ema' = legacy fixed-alpha baseline. Default: one-euro",
+    )
+    parser.add_argument(
+        "--min-cutoff",
+        type=float,
+        default=1.5,
+        help="one-euro only: rest smoothing in Hz. Lower = steadier hover, "
+        "more lag on slow drift. Default: 1.5",
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=0.4,
+        help="one-euro only: speed coefficient. Higher = less lag on fast "
+        "moves. Default: 0.4",
+    )
+    parser.add_argument(
         "--smoothing",
         type=float,
         default=0.90,
-        help="Alpha for cursor smoothing: 0=max smooth, 1=instant/no-smooth. Default: 0.90",
+        help="ema only: alpha per frame, 0=max smooth, 1=instant. Default: 0.90",
     )
 
     args = parser.parse_args()
@@ -95,7 +116,10 @@ Modes:
     print(f"  Mode:      {mode.upper()}")
     print(f"  Model:     {args.model or 'None (direct control)'}")
     print(f"  Camera:    {args.camera}")
-    print(f"  Smoothing: {args.smoothing}")
+    if args.filter == "one-euro":
+        print(f"  Filter:    one-euro (min_cutoff={args.min_cutoff} Hz, beta={args.beta})")
+    else:
+        print(f"  Filter:    ema (alpha={args.smoothing})")
     print("=" * 60)
     print("  Hand Controls:")
     print("    Wrist left/right       -> Bend tip L/R")
@@ -118,6 +142,9 @@ Modes:
         camera_id=args.camera,
         mode=mode,
         smoothing=args.smoothing,
+        filter_mode=args.filter,
+        min_cutoff=args.min_cutoff,
+        beta=args.beta,
     )
 
 

@@ -1,6 +1,16 @@
 # Stage B stacking curriculum: 2-section (4-DOF) arm rebuilds a source stack at a
-# target location, ramping stack height 2 -> 3 -> 4 as it masters each level
+# target location, ramping stack height 2 -> 3 as it masters each level
 # (reuses the multi-object curriculum: stack_count follows the shared level).
+#
+# WARM-START THIS from the pick_place_2section foundation policy:
+#   pick-place train-multi --config .../pick_place_stack.yaml \
+#       --init-model rex_results/pick_place_2section/<run>/models/best_model/best_model.zip
+# Training stacking from scratch diverges (policy std -> 8e4): the easy proximity
+# grasp needs no precision, so ent_coef pushes variance up unchecked. A competent
+# 4-DOF base policy + lower ent_coef keeps it stable.
+#
+# REACH LIMIT: cubes are 2 cm tall; the arm reaches ~0.068 m at the source xy, so
+# a source-stack TOP above 3 cubes (z>=0.072) is UNGRASPABLE. Curriculum caps at 3.
 pick_place:
   env:
     xml_file: "rex_assets/rex_simulation/pick_and_place_scene_2section.xml"
@@ -8,10 +18,11 @@ pick_place:
     initial_actuator_position: [0.13, 0.17]
     simulation_length_seconds: 20.0   # multiple cubes per episode
 
-    # Stacking height curriculum 2 -> 4 (bumps when place_success > 90%).
+    # Stacking height curriculum 2 -> 3 (bumps when place_success > 90%).
+    # Capped at 3: a 4-high source stack's top cube is beyond the arm's reach.
     object_curriculum_enabled: true
     min_spawned_objects: 2
-    max_spawned_objects: 4
+    max_spawned_objects: 3
 
     # Grasp: the 4-DOF arm reaches the table (z~0.01), so a near-contact grasp is
     # feasible here (unlike the 1-section arm). Snap the cube to the fingertip.
@@ -48,6 +59,9 @@ pick_place:
     learning_rate: 0.0003
     n_steps: 1024
     batch_size: 256
+    # Lower than the 0.01 default: with a competent warm-started base policy the
+    # extra exploration entropy is what let the action std diverge to 8e4.
+    ent_coef: 0.005
     log_dir_base: "rex_results/pick_place_stack"
 
   active_task: stack

@@ -8,6 +8,7 @@ __pycache__/
 # Experiment outputs (training runs, checkpoints, logs)
 rex_results/
 results/
+eval_results/
 _train_*.log
 MUJOCO_LOG.TXT
 

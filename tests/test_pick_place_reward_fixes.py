@@ -17,7 +17,7 @@ pytest.importorskip("stable_baselines3")
 from types import SimpleNamespace
 
 
-def _stacking_env(carry_scale: float = 0.0):
+def _stacking_env(carry_scale: float = 0.0, **env_overrides):
     from rex_tendon.configs.pick_place_config import (
         PickPlaceEnvConfig,
         PickPlaceTaskConfig,
@@ -29,6 +29,7 @@ def _stacking_env(carry_scale: float = 0.0):
         randomize_dynamics=False,
         add_observation_noise=False,
         carry_reach_reward_scale=carry_scale,
+        **env_overrides,
     )
     task = PickPlaceTaskConfig(
         stacking=True,
@@ -133,3 +134,110 @@ def test_stack_config_loads_with_fix():
     cfg = load_pick_place_config("rex_tendon/configs/pick_place_stack.yaml")
     assert cfg.env.carry_reach_reward_scale == 1.0
     assert cfg.training.ent_coef == 0.0075
+    assert cfg.env.grasp_requires_contact is True
+    assert cfg.env.place_mode == "release"
+    assert cfg.env.place_distance_threshold == 0.03
+
+
+def _float_cube_below_tip(env, gap: float = 0.025):
+    """Zero gravity and park the active cube `gap` m below the tip:
+    inside grasp proximity (0.035) but without any contact."""
+    env.model.opt.gravity[:] = 0.0
+    tip = env._get_tip_position()
+    env._set_object_position(
+        env.active_object_idx, tip + np.array([0.0, 0.0, -gap])
+    )
+
+
+def test_proximity_alone_grasps_only_in_legacy_mode():
+    action = None
+    for requires_contact, should_grasp in ((False, True), (True, False)):
+        env = _stacking_env(grasp_requires_contact=requires_contact)
+        try:
+            env.reset(seed=11)
+            _float_cube_below_tip(env)
+            action = np.zeros(env.action_space.shape, dtype=np.float32)
+            grasped = False
+            for _ in range(4):  # > grasp_consecutive_steps
+                _float_cube_below_tip(env)  # keep it parked despite drift
+                _, _, _, _, info = env.step(action)
+                grasped = grasped or info["is_grasped"]
+            assert grasped == should_grasp, (
+                f"requires_contact={requires_contact}: expected grasped="
+                f"{should_grasp}, got {grasped}"
+            )
+        finally:
+            env.close()
+
+
+def test_release_mode_releases_instead_of_snapping():
+    # When a carried cube comes within the threshold of the place zone, the
+    # grasp must open and a settle window must start — with NO teleport.
+    env = _stacking_env(
+        grasp_requires_contact=True, place_mode="release", place_settle_steps=3
+    )
+    try:
+        env.reset(seed=11)
+        env.model.opt.gravity[:] = 0.0  # keep the parked cube where it is
+        env._activate_grasp(env.active_object_idx)
+        action = np.zeros(env.action_space.shape, dtype=np.float32)
+        env.step(action)
+        cube_pos = env._get_object_position(env.active_object_idx).copy()
+        env._set_place_zone_position(cube_pos)  # trigger on next step
+
+        _, _, _, _, info = env.step(action)
+        assert info["place_settling"] is True
+        assert info["is_grasped"] is False  # grasp opened...
+        assert info["num_placed"] == 0  # ...but nothing counted yet
+        # And the cube was not teleported anywhere (residual release velocity
+        # may drift it a little in zero-g, hence the loose tolerance).
+        np.testing.assert_allclose(
+            env._get_object_position(env.active_object_idx), cube_pos, atol=5e-2
+        )
+    finally:
+        env.close()
+
+
+def test_settle_judgment_counts_cube_resting_on_slot():
+    env = _stacking_env(
+        place_mode="release", place_settle_steps=3, place_distance_threshold=0.03
+    )
+    try:
+        env.reset(seed=11)
+        idx = env.active_object_idx
+        slot0 = env._stacking_slot_position(0)
+        # Park the cube on the table 1 cm from the canonical slot and
+        # manufacture the settling state: the judgment must accept it.
+        env._set_object_position(idx, slot0 + np.array([0.0, 0.01, 0.001]))
+        env._place_pending_idx = idx
+        env._place_settle_countdown = 1
+        action = np.zeros(env.action_space.shape, dtype=np.float32)
+        _, _, _, _, info = env.step(action)
+        assert info["cubes_placed_this_step"] is True
+        assert info["num_placed"] == 1
+        assert info["place_failed_this_step"] is False
+    finally:
+        env.close()
+
+
+def test_settle_judgment_rejects_cube_far_from_slot():
+    env = _stacking_env(
+        place_mode="release", place_settle_steps=3, place_distance_threshold=0.03
+    )
+    try:
+        env.reset(seed=11)
+        idx = env.active_object_idx
+        slot0 = env._stacking_slot_position(0)
+        off_slot = slot0 + np.array([0.0, 0.06, 0.001])  # 6 cm off target
+        env._set_object_position(idx, off_slot)
+        env._place_pending_idx = idx
+        env._place_settle_countdown = 1
+        action = np.zeros(env.action_space.shape, dtype=np.float32)
+        _, _, _, _, info = env.step(action)
+        assert info["place_failed_this_step"] is True
+        assert info["num_placed"] == 0
+        # Failure must not teleport the cube to the slot either.
+        final_pos = env._get_object_position(idx)
+        assert float(np.linalg.norm(final_pos - slot0)) > 0.03
+    finally:
+        env.close()

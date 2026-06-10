@@ -24,12 +24,19 @@ pick_place:
     min_spawned_objects: 2
     max_spawned_objects: 3
 
-    # Grasp: the 4-DOF arm reaches the table (z~0.01), so a near-contact grasp is
-    # feasible here (unlike the 1-section arm). Snap the cube to the fingertip.
-    grasp_distance_threshold: 0.035
+    # Grasp: the 4-DOF arm reaches the table (z~0.01), so real contact grasping
+    # is feasible here (unlike the 1-section arm).
+    # ACCURACY MODE: a grasp latches only on force-bearing tip/cube contact
+    # (proximity alone is not a grasp), and placement releases the cube above
+    # the slot — physics decides whether it lands and the stack survives.
+    # This makes reported grasp/place numbers physical evidence, not snaps.
+    grasp_requires_contact: true
+    grasp_distance_threshold: 0.035   # still used for the proximity shaping bonus
     grasp_consecutive_steps: 2
     grasp_carry_offset: 0.015
-    place_distance_threshold: 0.05    # stacking needs placement accuracy
+    place_mode: release
+    place_settle_steps: 6             # ~0.5 s of physics before judging
+    place_distance_threshold: 0.03    # release trigger + settled-cube tolerance
 
     # Reach/grasp phase transfers fast; enter placing early.
     curriculum_enabled: true

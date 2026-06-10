@@ -150,6 +150,9 @@ class TentaclePickPlaceEnv(gym.Env):
         self.action_jerk_penalty_scale = self.config.action_jerk_penalty_scale
         self.object_progress_reward_scale = self.config.object_progress_reward_scale
         self.carry_reach_reward_scale = self.config.carry_reach_reward_scale
+        self.grasp_requires_contact = self.config.grasp_requires_contact
+        self.place_mode = self.config.place_mode
+        self.place_settle_steps = int(self.config.place_settle_steps)
         self.stable_contact_bonus_scale = self.config.stable_contact_bonus_scale
         self.grasp_proximity_bonus_scale = self.config.grasp_proximity_bonus_scale
         self.assisted_grasp_enabled = self.config.assisted_grasp_enabled
@@ -311,6 +314,10 @@ class TentaclePickPlaceEnv(gym.Env):
             0.005,
         )
         self._stack_toppled = False
+        # place_mode="release": cube released above the slot, judged after a
+        # short settle window instead of being teleported into place.
+        self._place_pending_idx = -1
+        self._place_settle_countdown = 0
 
         # Renderer
         self.image_size = (84, 84)
@@ -754,6 +761,8 @@ class TentaclePickPlaceEnv(gym.Env):
         self._episode_collision = False
         self._episode_occluded = False
         self._episode_ever_grasped = False
+        self._place_pending_idx = -1
+        self._place_settle_countdown = 0
 
         # Deactivate all grasp constraints
         self._deactivate_all_grasps()
@@ -1015,7 +1024,12 @@ class TentaclePickPlaceEnv(gym.Env):
         collision = self._compute_collision()
         self._episode_collision = self._episode_collision or collision
         within_grasp_proximity = tip_to_obj <= self.grasp_distance_threshold
-        grasp_signal = has_tip_object_contact or within_grasp_proximity
+        if self.grasp_requires_contact:
+            # Accuracy mode: only real (force-bearing) contact latches a grasp;
+            # being near the cube is not holding the cube.
+            grasp_signal = has_tip_object_contact
+        else:
+            grasp_signal = has_tip_object_contact or within_grasp_proximity
         lift_base = max(
             float(self.object_rest_z[self.active_object_idx]),
             float(self._object_spawn_z[self.active_object_idx]),
@@ -1057,21 +1071,54 @@ class TentaclePickPlaceEnv(gym.Env):
 
         obj_on_table_or_above = obj_pos[2] >= self.object_rest_z[self.active_object_idx] - 0.005
         placed_this_step = False
+        place_failed_this_step = False
         if self._stacking:
-            # Place the carried cube onto the current target slot when close enough.
-            if (
+            if self._place_settle_countdown > 0:
+                # A released cube is settling (place_mode="release"): judge the
+                # placement only after physics has had its say.
+                pending = self._place_pending_idx
+                if self.is_grasped and self.active_object_idx == pending:
+                    # Re-grasped mid-settle — the place attempt is withdrawn.
+                    self._place_settle_countdown = 0
+                    self._place_pending_idx = -1
+                else:
+                    self._place_settle_countdown -= 1
+                    if self._place_settle_countdown == 0:
+                        slot = self._stacking_slot_position(self._num_placed)
+                        pend_pos = self._get_object_position(pending)
+                        if (
+                            float(np.linalg.norm(pend_pos - slot))
+                            <= self.place_distance_threshold
+                        ):
+                            self._num_placed += 1
+                            placed_this_step = True
+                            self._set_place_zone_position(
+                                self._stacking_slot_position(self._num_placed)
+                            )
+                        else:
+                            place_failed_this_step = True
+                        self._place_pending_idx = -1
+
+            elif (
                 self.is_grasped
                 and obj_to_place <= self.place_distance_threshold
                 and phase >= PickPlacePhase.FULL
             ):
-                self._set_object_position(self.active_object_idx, place_pos)
-                self._deactivate_grasp(self.active_object_idx)
-                self._num_placed += 1
-                placed_this_step = True
-                # Advance the target site to the next (higher) slot.
-                self._set_place_zone_position(
-                    self._stacking_slot_position(self._num_placed)
-                )
+                if self.place_mode == "release":
+                    # Open the grasp above the slot; the cube must land there
+                    # by physics for the placement to count.
+                    self._deactivate_grasp(self.active_object_idx)
+                    self._place_pending_idx = self.active_object_idx
+                    self._place_settle_countdown = self.place_settle_steps
+                else:
+                    # Legacy snap: teleport the carried cube onto the slot.
+                    self._set_object_position(self.active_object_idx, place_pos)
+                    self._deactivate_grasp(self.active_object_idx)
+                    self._num_placed += 1
+                    placed_this_step = True
+                    self._set_place_zone_position(
+                        self._stacking_slot_position(self._num_placed)
+                    )
             self._stack_toppled = self._stacking_check_toppled()
             self.place_success = (
                 self._num_placed >= self._stack_count and not self._stack_toppled
@@ -1118,6 +1165,9 @@ class TentaclePickPlaceEnv(gym.Env):
         if self._stacking:
             if placed_this_step:
                 reward += self.place_bonus  # per-cube placement
+            if place_failed_this_step:
+                # Released the cube near the slot but it did not settle there.
+                reward -= self.drop_penalty
             if self._stack_toppled:
                 reward -= self.drop_penalty  # knocked the target stack over
 
@@ -1169,6 +1219,8 @@ class TentaclePickPlaceEnv(gym.Env):
         info["stack_count"] = self._stack_count
         info["stack_toppled"] = self._stack_toppled
         info["cubes_placed_this_step"] = placed_this_step
+        info["place_failed_this_step"] = place_failed_this_step
+        info["place_settling"] = self._place_settle_countdown > 0
         # Multi-object curriculum metrics
         info["num_objects"] = self._episode_num_objects
         info["collision"] = collision

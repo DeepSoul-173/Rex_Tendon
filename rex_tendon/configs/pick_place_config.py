@@ -1,6 +1,6 @@
 """Pick-and-place RL configuration models."""
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 from pydantic import Field
 from .base import BaseConfig
 
@@ -144,6 +144,25 @@ class PickPlaceEnvConfig(BaseConfig):
         description="Carry-phase analog of the reach reward: while grasped, penalize the "
         "tip's distance to the place target (-scale * tip_to_place). Fills the gradient "
         "dead zone after grasping, when tip_to_obj is ~0 and the reach term goes flat.",
+    )
+    # Grasp/place accuracy (trust of reported success)
+    grasp_requires_contact: bool = Field(
+        default=False,
+        description="Accuracy mode: only real force-bearing tip/object contact can latch "
+        "a grasp. Default False keeps the legacy hybrid trigger, where proximity alone "
+        "(tip within grasp_distance_threshold) also counts.",
+    )
+    place_mode: Literal["snap", "release"] = Field(
+        default="snap",
+        description="Stacking placement: 'snap' teleports the carried cube onto the slot "
+        "when within place_distance_threshold (legacy); 'release' opens the grasp above "
+        "the slot and lets physics settle the cube — placement counts only if the cube "
+        "comes to rest within the threshold (and the stack survives the topple check).",
+    )
+    place_settle_steps: int = Field(
+        default=6,
+        description="place_mode='release' only: env steps to wait after releasing before "
+        "judging whether the cube settled onto the slot.",
     )
     stable_contact_bonus_scale: float = Field(
         default=0.0,

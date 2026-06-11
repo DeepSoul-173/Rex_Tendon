@@ -161,13 +161,16 @@ def test_stack_config_loads_with_fix():
     from rex_tendon.training.rl.pick_place_training import load_pick_place_config
 
     cfg = load_pick_place_config("rex_tendon/configs/pick_place_stack.yaml")
-    # Run-3 reward design: holding pays, transport is potential-based, no
-    # absolute carry penalty (run-2 lesson: it teaches contact avoidance).
+    # Run-4 design: hybrid grasp trigger (contact-only is undiscoverable —
+    # 0.3% latch rate in the oracle probe), holding (0.15) beats hovering
+    # (proximity capped at 0.1), transport potential-based, physical
+    # release-and-settle placement kept.
     assert cfg.env.carry_reach_reward_scale == 0.0
     assert cfg.env.grasp_hold_bonus == 0.15
+    assert cfg.env.grasp_proximity_bonus_scale == 0.1
     assert cfg.env.object_progress_reward_scale == 12.0
     assert cfg.training.ent_coef == 0.005
-    assert cfg.env.grasp_requires_contact is True
+    assert cfg.env.grasp_requires_contact is False
     assert cfg.env.place_mode == "release"
     assert cfg.env.place_distance_threshold == 0.03
 

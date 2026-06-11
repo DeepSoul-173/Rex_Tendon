@@ -24,19 +24,26 @@ pick_place:
     min_spawned_objects: 2
     max_spawned_objects: 3
 
-    # Grasp: the 4-DOF arm reaches the table (z~0.01), so real contact grasping
-    # is feasible here (unlike the 1-section arm).
-    # ACCURACY MODE: a grasp latches only on force-bearing tip/cube contact
-    # (proximity alone is not a grasp), and placement releases the cube above
-    # the slot — physics decides whether it lands and the stack survives.
-    # This makes reported grasp/place numbers physical evidence, not snaps.
-    grasp_requires_contact: true
-    grasp_distance_threshold: 0.035   # still used for the proximity shaping bonus
+    # Grasp trigger: hybrid (contact OR proximity). Contact-only was probed
+    # (2026-06-11): random approaches achieve force-bearing contact in 0.7% of
+    # episodes and latch in 0.3% — undiscoverable for RL; runs 2 & 3 (12M each)
+    # both collapsed to 0% grasping under grasp_requires_contact: true. Since
+    # the carry is assisted regardless, the trigger's realism was cosmetic;
+    # placement below is where physics is the judge. Grasp realism = documented
+    # limitation (future work: wrap-grasp contact physics).
+    grasp_requires_contact: false
+    grasp_distance_threshold: 0.035
     grasp_consecutive_steps: 2
     grasp_carry_offset: 0.015
+    # PLACEMENT ACCURACY (kept): the cube is released above the slot and must
+    # physically land within tolerance + survive the topple check. Oracle probe:
+    # 12/300 random-action carries complete a real placement -> discoverable.
     place_mode: release
     place_settle_steps: 6             # ~0.5 s of physics before judging
     place_distance_threshold: 0.03    # release trigger + settled-cube tolerance
+    # Holding (0.15/step) must beat hovering near the cube: cap the proximity
+    # shaping at 0.1/step (default 0.25 out-paid holding at ~1 cm — run-3 flaw).
+    grasp_proximity_bonus_scale: 0.1
 
     # Reach/grasp phase transfers fast; enter placing early.
     curriculum_enabled: true
@@ -54,10 +61,14 @@ pick_place:
     #    net-negative for a policy that can't place yet; grasp rate fell
     #    10% -> 0%, std then blew up 0.16 -> 544. Avoidable state + absolute
     #    in-state penalty = state avoidance.
-    #  - Run 3 (this config): holding pays (+0.15/step > the ~0.11/step max
-    #    proximity hover), transport gradient is potential-based and 4x
-    #    stronger (progress x12), finishing dominates holding forever
-    #    (place 20+20 per episode vs hold flow <= 0.15*250 = 37.5 minus time).
+    #  - Run 3 (12M, ent 0.005): hold bonus + progress x12 fixed std (stayed
+    #    0.11-0.40, no blowup) but contact-grasping still died (4% -> 0%):
+    #    (a) the proximity bonus (max 0.25/step) out-paid holding (0.15), and
+    #    (b) the oracle probe showed contact latches in only 0.3% of random
+    #    episodes — undiscoverable regardless of incentives.
+    #  - Run 4 (this config): hybrid grasp trigger restored (see below),
+    #    proximity bonus capped at 0.1 < hold 0.15, physical release-place
+    #    kept (probe: 12/300 random carries place successfully -> learnable).
     reach_reward_scale: 1.0
     grasp_bonus: 5.0
     grasp_hold_bonus: 0.15

@@ -26,6 +26,7 @@ class CommandAction(Enum):
     PICK = "pick"
     PLACE = "place"
     STACK = "stack"
+    STACK_ALL = "stack_all"  # composite: build a tower from every cube
     MOVE = "move"
     RELEASE = "release"
     STOP = "stop"
@@ -36,12 +37,15 @@ class CommandAction(Enum):
 # Colors that can appear as object slots. Matches the simulation cube set
 # (obj_cube, obj_cube_purple, obj_cube_yellow, obj_cube_extra_*); validation
 # against the actually-loaded scene happens in validate_intent().
-KNOWN_COLORS = ("red", "green", "blue", "purple", "yellow", "orange", "white")
+KNOWN_COLORS = ("red", "green", "blue", "purple", "yellow", "orange", "white", "gray")
 
 KNOWN_DIRECTIONS = ("left", "right", "up", "down", "forward", "back")
 
+# Named place locations the executor can resolve in the scene.
+KNOWN_LOCATIONS = ("corner", "center", "middle", "zone", "target")
+
 # Words that may refer to a graspable object.
-_OBJECT_WORDS = r"(?:cube|die|dice|block|box|object|one)"
+_OBJECT_WORDS = r"(?:cube|die|dice|block|box|ball|sphere|object|one|it|something)"
 
 
 @dataclass(frozen=True)
@@ -49,9 +53,10 @@ class VoiceIntent:
     """A parsed command. Slots are None when not present in the utterance."""
 
     action: CommandAction
-    target_color: Optional[str] = None  # object to act on
+    target_color: Optional[str] = None  # object to act on (None = held/nearest)
     destination_color: Optional[str] = None  # for STACK: base object
     direction: Optional[str] = None  # for MOVE
+    location: Optional[str] = None  # for PLACE: named spot (corner/center/zone)
     raw_text: str = ""
 
 
@@ -60,28 +65,42 @@ class VoiceIntent:
 _COLOR_RE = "|".join(KNOWN_COLORS)
 _DIR_RE = "|".join(KNOWN_DIRECTIONS)
 
-# Order matters: more specific patterns first (stack before pick, since
-# "stack the red cube on the blue cube" also contains pick-like words).
+# Order matters: more specific patterns first (stack-all before stack, stack
+# before pick — "stack the red cube on the blue cube" contains pick words too).
 _RULES: list[tuple[CommandAction, re.Pattern[str]]] = [
     (
-        CommandAction.STACK,
+        CommandAction.STACK_ALL,
         re.compile(
-            rf"\b(?:stack|put|place)\b.*?\b(?P<target>{_COLOR_RE})\b"
-            rf".*?\b(?:on|onto|on top of|over)\b.*?\b(?P<dest>{_COLOR_RE})\b"
+            r"(?:\b(?:build|make)\b.*?\b(?:stack|tower|pile)\b"
+            r"|\bstack\b.*?\b(?:all|every(?:thing)?)\b)"
+        ),
+    ),
+    (
+        CommandAction.STACK,
+        # A placement verb anywhere + "<color?> on (top of) <color>". The
+        # target is optional: "put it on top of the blue" stacks the HELD
+        # object onto blue.
+        re.compile(
+            rf"(?=.*\b(?:stack|put|place|take|set|move|drop)\b)"
+            rf"(?:.*?\b(?P<target>{_COLOR_RE})\b)?.*?"
+            rf"\b(?:on\s+top\s+of|in\s+the\s+top\s+of|top\s+of|onto|on|over)\b"
+            rf".*?\b(?P<dest>{_COLOR_RE})\b"
         ),
     ),
     (
         CommandAction.PICK,
         re.compile(
-            rf"\b(?:pick|grab|grasp|take|get|lift|hold)\b"
+            rf"\b(?:pick|grab|grasp|take|get|lift|hold|catch|regrasp|re-grasp)\b"
             rf"(?:.*?\b(?P<target>{_COLOR_RE})\b)?.*?{_OBJECT_WORDS}"
         ),
     ),
     (
         CommandAction.PLACE,
         re.compile(
-            rf"\b(?:place|put|set)\b(?:.*?\b(?P<target>{_COLOR_RE})\b)?"
-            rf".*?\b(?:down|there|at the target|on the table)\b"
+            rf"\b(?:place|put|set|drop)\b(?:.*?\b(?P<target>{_COLOR_RE})\b)?.*?"
+            rf"\b(?:(?:in|at|to|near)\s+the\s+"
+            rf"(?P<location>corner|center|middle|zone|target)"
+            rf"|down|there|on\s+the\s+table)\b"
         ),
     ),
     (
@@ -123,6 +142,7 @@ def parse_intent(text: str) -> Optional[VoiceIntent]:
             target_color=groups.get("target"),
             destination_color=groups.get("dest"),
             direction=groups.get("direction"),
+            location=groups.get("location"),
             raw_text=text,
         )
     return None
@@ -151,9 +171,11 @@ def validate_intent(
     a = intent.action
 
     if a is CommandAction.STACK:
-        if intent.target_color is None or intent.destination_color is None:
+        if intent.destination_color is None:
+            return ValidationResult(False, "stack needs a base color")
+        if intent.target_color is None and not holding_object:
             return ValidationResult(
-                False, "stack needs both a target and a base color"
+                False, "nothing is held — say which color to stack"
             )
         if intent.target_color == intent.destination_color:
             return ValidationResult(
@@ -203,6 +225,8 @@ class DryRunExecutor:
             slots.append(f"dest={intent.destination_color}")
         if intent.direction:
             slots.append(f"dir={intent.direction}")
+        if intent.location:
+            slots.append(f"loc={intent.location}")
         detail = f" ({', '.join(slots)})" if slots else ""
         return f"DRY RUN: {intent.action.value}{detail}"
 
@@ -221,3 +245,29 @@ def handle_text(
     if not verdict.ok:
         return f"Rejected ({intent.action.value}): {verdict.reason}"
     return executor.execute(intent)
+
+
+_SEQUENCE_SPLIT = re.compile(r"\s+(?:and\s+then|then|and)\s+")
+
+
+def handle_text_sequence(
+    text: str,
+    executor: IntentExecutor,
+    available_colors: Optional[set[str]] = None,
+) -> list[str]:
+    """Execute a compound command: 'take the red cube and put it on the blue'.
+
+    Segments split on and/then run in order; the gripper state is re-queried
+    from the executor between segments (so 'drop it and catch it' works).
+    Stops at the first segment that fails to parse or validate.
+    """
+    results: list[str] = []
+    for segment in _SEQUENCE_SPLIT.split(text.strip()):
+        if not segment.strip():
+            continue
+        holding = bool(getattr(executor, "holding_object", False))
+        out = handle_text(segment, executor, available_colors, holding)
+        results.append(out)
+        if out.startswith(("Not understood", "Rejected")):
+            break
+    return results

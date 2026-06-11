@@ -53,6 +53,37 @@ def test_pick_and_place_at_zone(arm):
     assert final[2] < 0.05  # actually resting near the table, not floating
 
 
+def test_voice_sequence_pick_stack_and_place_at_corner():
+    from rex_tendon.control.sim_primitives import SimArm, SimIntentExecutor
+    from rex_tendon.control.voice_commands import handle_text_sequence
+
+    arm = SimArm(viewer=False, arrange_objects=True, arrange_seed=2)
+    try:
+        executor = SimIntentExecutor(arm)
+        colors = arm.scene_colors()
+
+        out = handle_text_sequence(
+            "take the red cube and put it on top of the purple", executor, colors
+        )
+        assert out[0].startswith("Picked up the red")
+        assert "purple" in out[1]
+        assert not executor.holding_object  # released after the stack attempt
+
+        out = handle_text_sequence(
+            "pick up the yellow cube and put it in the corner", executor, colors
+        )
+        assert out[0].startswith("Picked up the yellow")
+        assert "corner" in out[1]
+        # The cube must end near the corner point regardless of phrasing.
+        corner = arm.resolve_location("corner")
+        yellow = arm.find_object(color="yellow")
+        import numpy as _np
+
+        assert _np.linalg.norm(yellow.position(arm.data)[:2] - corner[:2]) <= 0.07
+    finally:
+        arm.close()
+
+
 def test_voice_intent_executor_pick(arm):
     from rex_tendon.control.sim_primitives import SimIntentExecutor
     from rex_tendon.control.voice_commands import handle_text

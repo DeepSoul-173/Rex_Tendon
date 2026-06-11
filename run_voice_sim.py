@@ -4,8 +4,8 @@
 Natural-language commands drive the simulated arm through scripted movement
 primitives. Parsing is rule-based (control/voice_commands.py): it needs NO
 LLM, NO GPU, and no API key — suitable for the viva demo on any laptop.
-Speech input uses the SpeechRecognition package when requested; typed input
-always works.
+Compound commands run as sequences, and objects are arranged into the arm's
+reachable workspace at startup.
 
 Usage:
     python run_voice_sim.py                       # typed commands + viewer
@@ -13,9 +13,11 @@ Usage:
     python run_voice_sim.py --xml <scene.xml>     # different scene
 
 Example commands:
-    pick up the red cube          stack yellow on purple
-    place it down                 move left
-    let go                        go home
+    pick up the red cube
+    take the red cube and put it on top of the purple
+    put it in the corner            place it in the zone
+    build a stack with all the cubes
+    drop it and catch it            move left        go home
 """
 
 from __future__ import annotations
@@ -23,53 +25,12 @@ from __future__ import annotations
 import argparse
 import queue
 import sys
-import threading
-import time
 
 sys.path.insert(0, ".")
 
 from rex_tendon.control.sim_primitives import SimArm, SimIntentExecutor
-from rex_tendon.control.voice_commands import handle_text
-
-
-def _typed_input_loop(commands: queue.Queue) -> None:
-    while True:
-        try:
-            text = input("voice> ")
-        except (EOFError, KeyboardInterrupt):
-            commands.put("quit")
-            return
-        commands.put(text)
-        if text.strip().lower() in {"quit", "exit"}:
-            return
-
-
-def _speech_input_loop(commands: queue.Queue) -> None:
-    try:
-        import speech_recognition as sr
-    except ImportError:
-        print("SpeechRecognition not installed — falling back to typed input.")
-        _typed_input_loop(commands)
-        return
-
-    recognizer = sr.Recognizer()
-    mic = sr.Microphone()
-    with mic as source:
-        recognizer.adjust_for_ambient_noise(source, duration=1.0)
-    print("Microphone ready — speak a command.")
-    while True:
-        with mic as source:
-            audio = recognizer.listen(source, phrase_time_limit=5)
-        try:
-            text = recognizer.recognize_google(audio)
-        except sr.UnknownValueError:
-            continue
-        except sr.RequestError as exc:
-            print(f"ASR error: {exc} — switching to typed input.")
-            _typed_input_loop(commands)
-            return
-        print(f"Heard: {text}")
-        commands.put(text)
+from rex_tendon.control.voice_commands import handle_text_sequence
+from rex_tendon.control.voice_io import start_input_thread
 
 
 def main() -> None:
@@ -88,9 +49,20 @@ def main() -> None:
     parser.add_argument(
         "--no-viewer", action="store_true", help="Headless (for testing)"
     )
+    parser.add_argument(
+        "--keep-layout",
+        action="store_true",
+        help="Keep the scene's default object layout instead of arranging "
+        "everything into the reachable workspace",
+    )
     args = parser.parse_args()
 
-    arm = SimArm(args.xml, viewer=not args.no_viewer, realtime=not args.no_viewer)
+    arm = SimArm(
+        args.xml,
+        viewer=not args.no_viewer,
+        realtime=not args.no_viewer,
+        arrange_objects=not args.keep_layout,
+    )
     executor = SimIntentExecutor(arm)
     colors = arm.scene_colors()
 
@@ -99,13 +71,13 @@ def main() -> None:
     print("=" * 60)
     print(f"  Scene objects: "
           f"{', '.join(f'{o.color} {o.shape}' for o in arm.objects)}")
-    print("  Try: 'pick up the red cube', 'stack yellow on purple',")
-    print("       'place it down', 'move left', 'let go', 'go home', 'quit'")
+    print("  Try: 'take the red cube and put it on top of the purple',")
+    print("       'build a stack with all the cubes', 'put it in the corner',")
+    print("       'drop it and catch it', 'go home', 'quit'")
     print("=" * 60)
 
     commands: queue.Queue = queue.Queue()
-    input_loop = _typed_input_loop if args.asr == "typed" else _speech_input_loop
-    threading.Thread(target=input_loop, args=(commands,), daemon=True).start()
+    start_input_thread(commands, mode=args.asr)
 
     try:
         while True:
@@ -116,13 +88,8 @@ def main() -> None:
                 continue
             if text.strip().lower() in {"quit", "exit"}:
                 break
-            result = handle_text(
-                text,
-                executor,
-                available_colors=colors,
-                holding_object=executor.holding_object,
-            )
-            print(result)
+            for line in handle_text_sequence(text, executor, colors):
+                print(line)
     except KeyboardInterrupt:
         pass
     finally:

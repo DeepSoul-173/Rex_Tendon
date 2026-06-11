@@ -98,6 +98,14 @@ Modes:
         default=0.90,
         help="ema only: alpha per frame, 0=max smooth, 1=instant. Default: 0.90",
     )
+    parser.add_argument(
+        "--voice",
+        choices=["off", "typed", "speech"],
+        default="off",
+        help="Voice co-pilot: say 'grab the red cube' / 'release' / 'neutral' "
+        "while steering by hand. 'typed' reads from this terminal; 'speech' "
+        "uses the microphone (SpeechRecognition).",
+    )
 
     args = parser.parse_args()
 
@@ -146,6 +154,7 @@ Modes:
         filter_mode=args.filter,
         min_cutoff=args.min_cutoff,
         beta=args.beta,
+        voice=None if args.voice == "off" else args.voice,
     )
 
 

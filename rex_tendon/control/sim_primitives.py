@@ -91,6 +91,8 @@ class SimArm:
         xml_path: str = "rex_assets/rex_simulation/pick_and_place_scene.xml",
         viewer: bool = False,
         realtime: bool = False,
+        arrange_objects: bool = False,
+        arrange_seed: int = 0,
     ):
         self.model = mujoco.MjModel.from_xml_path(xml_path)
         self.data = mujoco.MjData(self.model)
@@ -127,6 +129,11 @@ class SimArm:
         # scene. The viewer attaches afterwards so calibration is invisible.
         self._viewer = None
         self._calibrate_polar()
+        # The XML's default object layout spreads across the whole table; most
+        # of it is beyond the settled reach (~0.069 m). Arranging pulls every
+        # object into the workspace so voice commands can act on all of them.
+        if arrange_objects:
+            self._arrange_objects(arrange_seed)
         if viewer:
             self._viewer = mujoco.viewer.launch_passive(self.model, self.data)
 
@@ -207,6 +214,34 @@ class SimArm:
         self._cursor_slew.reset(self.cursor)
         self._write_ctrl()
         mujoco.mj_forward(self.model, self.data)
+
+    def _arrange_objects(self, seed: int = 0) -> None:
+        """Respawn every object at a random collision-free reachable spot."""
+        rng = np.random.default_rng(seed)
+        placed: list[np.ndarray] = []
+        for obj in self.objects:
+            xy = None
+            for _ in range(80):
+                az = rng.uniform(-np.pi, np.pi)
+                r = rng.uniform(0.045, 0.066)
+                candidate = np.array([r * np.cos(az), r * np.sin(az)])
+                if all(np.linalg.norm(candidate - p) >= 0.05 for p in placed):
+                    xy = candidate
+                    break
+            if xy is None:
+                continue  # workspace full — leave this object where it is
+            placed.append(xy)
+            jnt = self.model.body_jntadr[obj.body_id]
+            if jnt < 0:
+                continue
+            adr = self.model.jnt_qposadr[jnt]
+            self.data.qpos[adr : adr + 3] = [xy[0], xy[1], obj.half_height + 0.001]
+            self.data.qpos[adr + 3 : adr + 7] = [1, 0, 0, 0]
+            vadr = self.model.jnt_dofadr[jnt]
+            if vadr >= 0:
+                self.data.qvel[vadr : vadr + 6] = 0.0
+        mujoco.mj_forward(self.model, self.data)
+        self.step(20)  # settle
 
     def _seed_cursor_for(self, target_xy: np.ndarray) -> tuple[float, float]:
         """Initial (cursor azimuth, magnitude) for a target from calibration."""
@@ -363,17 +398,69 @@ class SimArm:
         # what the task defines as a successful placement.
         return float(np.linalg.norm(final[:2] - target[:2])) <= PLACE_TOL
 
+    def _slot_on(self, base: SceneObject, top_half: float) -> np.ndarray:
+        """World point where a carried object should rest on top of `base`."""
+        return base.position(self.data) + np.array(
+            [0.0, 0.0, base.half_height + top_half + 0.002]
+        )
+
     def stack(self, top_color: str, base_color: str) -> bool:
         """Pick the top_color object and place it on the base_color object."""
         top = self.find_object(color=top_color)
-        base = self.find_object(color=base_color)
-        if top is None or base is None or not self.grasp(top):
+        if top is None or not self.grasp(top):
             return False
-        base_pos = base.position(self.data)
-        slot = base_pos + np.array(
-            [0.0, 0.0, base.half_height + top.half_height + 0.002]
-        )
-        return self.place_at(slot)
+        return self.stack_held_on(base_color)
+
+    def stack_held_on(self, base_color: str) -> bool:
+        """Place the currently held object onto the base_color object."""
+        if self.grasped is None:
+            return False
+        base = self.find_object(color=base_color)
+        if base is None or base is self.grasped:
+            return False
+        return self.place_at(self._slot_on(base, self.grasped.half_height))
+
+    def stack_all(self) -> tuple[int, int]:
+        """Build a tower from every cube in the workspace.
+
+        Base = the cube nearest mid-workspace (keeps the growing tower
+        reachable). Returns (stacked, attempted); stops at the first failure —
+        physically, towers beyond 2-3 cubes exceed the carry height this arm
+        can deliver, so the honest count is the result.
+        """
+        cubes = [
+            o
+            for o in self.objects
+            if o.shape == "cube" and o.position(self.data)[2] > -0.5
+        ]
+        if len(cubes) < 2:
+            return 0, 0
+        mid = np.array([0.0, -0.05])
+        cubes.sort(key=lambda o: float(np.linalg.norm(o.position(self.data)[:2] - mid)))
+        top_of_stack = cubes[0]
+        stacked = attempted = 0
+        for cube in cubes[1:]:
+            attempted += 1
+            if not self.grasp(cube):
+                break
+            if not self.place_at(self._slot_on(top_of_stack, cube.half_height)):
+                break
+            stacked += 1
+            top_of_stack = cube
+        return stacked, attempted
+
+    def resolve_location(self, name: Optional[str]) -> Optional[np.ndarray]:
+        """Map a spoken location name to a world point."""
+        if name in ("zone", "target"):
+            p = self.place_zone_position()
+            return np.array([p[0], p[1], 0.002])
+        if name in ("center", "middle"):
+            return np.array([0.0, -0.06, 0.002])
+        if name == "corner":
+            # Toward the table's near corner, at the edge of settled reach.
+            d = R_REACH / np.sqrt(2.0)
+            return np.array([d, -d, 0.002])
+        return None
 
     def neutral(self) -> None:
         self.cursor = np.zeros(2, dtype=np.float64)
@@ -433,16 +520,34 @@ class SimIntentExecutor:
                 f"Could not reach the {obj.color} {obj.shape}."
             )
         if a is A.STACK:
-            ok = self.arm.stack(intent.target_color, intent.destination_color)
+            if intent.target_color is None:
+                # "put it on top of the blue" — stack the held object.
+                ok = self.arm.stack_held_on(intent.destination_color)
+                top = "the held object"
+            else:
+                ok = self.arm.stack(intent.target_color, intent.destination_color)
+                top = intent.target_color
             return (
-                f"Stacked {intent.target_color} on {intent.destination_color}."
+                f"Stacked {top} on {intent.destination_color}."
                 if ok
-                else f"Stacking {intent.target_color} on "
-                f"{intent.destination_color} failed."
+                else f"Stacking {top} on {intent.destination_color} failed."
             )
+        if a is A.STACK_ALL:
+            stacked, attempted = self.arm.stack_all()
+            if attempted == 0:
+                return "Not enough cubes in reach to build a tower."
+            return f"Tower built: stacked {stacked} of {attempted} cubes."
         if a is A.PLACE:
-            ok = self.arm.place_at(self.arm.place_zone_position())
-            return "Placed at the target zone." if ok else "Placement missed."
+            target = (
+                self.arm.resolve_location(intent.location)
+                if intent.location
+                else self.arm.place_zone_position()
+            )
+            if target is None:
+                return f"I don't know where '{intent.location}' is."
+            ok = self.arm.place_at(target)
+            where = intent.location or "the target zone"
+            return f"Placed at {where}." if ok else f"Placement at {where} missed."
         if a is A.RELEASE:
             self.arm.release()
             return "Released."

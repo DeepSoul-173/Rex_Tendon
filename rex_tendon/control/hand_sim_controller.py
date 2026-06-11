@@ -30,6 +30,7 @@ Work Envelope
   is restored before the next physics step.
 """
 
+import queue
 import threading
 import time
 import logging
@@ -43,8 +44,10 @@ import mujoco.viewer
 from mujoco import renderer
 
 from ..control.geometry import convert_2d_cursor_to_target_lengths
-from ..perception.scene_objects import discover_objects
+from ..perception.scene_objects import discover_objects, find_by_color
 from .smoothing import HoldToTrigger, OneEuroFilter, SlewRateLimiter
+from .voice_commands import CommandAction, parse_intent
+from .voice_io import start_input_thread
 
 logger = logging.getLogger(__name__)
 
@@ -485,6 +488,7 @@ class HandSimController:
         filter_mode: str = "one-euro",
         min_cutoff: float = CURSOR_MIN_CUTOFF,
         beta: float = CURSOR_BETA,
+        voice: Optional[str] = None,  # None | "typed" | "speech"
     ):
         if filter_mode not in ("one-euro", "ema"):
             raise ValueError(
@@ -583,6 +587,16 @@ class HandSimController:
         self._has_robot_cam = _cam_exists("robot_cam")
         self._has_corner_cam = _cam_exists("table_corner_cam")
 
+        # Voice co-pilot: hand steers continuous motion, voice handles the
+        # discrete decisions (grab <color> / release / neutral / stop).
+        self._voice_queue: Optional[queue.Queue] = None
+        self._voice_target = None  # SceneObject armed for voice-assisted grasp
+        self._voice_status = ""
+        if voice in ("typed", "speech"):
+            self._voice_queue = queue.Queue()
+            start_input_thread(self._voice_queue, mode=voice)
+            self._voice_status = "voice co-pilot ready — say 'grab the red cube'"
+
         self.camera_id = camera_id
         mujoco.mj_forward(self.mj_model, self.mj_data)
 
@@ -610,7 +624,7 @@ class HandSimController:
                 best_d, best_bid = d, bid
         return best_bid, best_d
 
-    def _try_lock_grasp(self):
+    def _try_lock_grasp(self, preferred_bid: int = -1):
         if self.grasp_locked:
             return
         self.grasp_locked = True
@@ -619,6 +633,12 @@ class HandSimController:
 
         bid, dist = self._nearest_object()
         tip_pos = self.mj_data.site_xpos[self.tip_site_id].copy()
+        if preferred_bid >= 0:
+            p_dist = float(
+                np.linalg.norm(tip_pos - self.mj_data.xpos[preferred_bid])
+            )
+            if p_dist <= AUTO_WRAP_DIST:
+                bid, dist = preferred_bid, p_dist
 
         if dist <= AUTO_WRAP_DIST and bid >= 0:
             self.grasped_bid = bid
@@ -667,6 +687,87 @@ class HandSimController:
         self._pinch_hold.reset()
         self._grasp_offset = np.zeros(3, dtype=np.float32)
         logger.info("Grasp UNLOCKED.")
+
+    # ── Voice co-pilot ─────────────────────────────────────────────────────────
+
+    def _drain_voice_commands(self) -> None:
+        """Apply queued voice commands — discrete decisions only; the hand
+        keeps continuous control of motion."""
+        if self._voice_queue is None:
+            return
+        while True:
+            try:
+                text = self._voice_queue.get_nowait()
+            except queue.Empty:
+                return
+            intent = parse_intent(text)
+            if intent is None:
+                self._voice_status = f"voice: didn't get '{text.strip()}'"
+                continue
+            a = intent.action
+            if a is CommandAction.PICK:
+                obj = (
+                    find_by_color(self.scene_objects, intent.target_color)
+                    if intent.target_color
+                    else "nearest"
+                )
+                if obj is None:
+                    self._voice_status = (
+                        f"voice: no {intent.target_color} object in this scene"
+                    )
+                    continue
+                self._voice_target = obj
+                name = (
+                    "nearest object"
+                    if obj == "nearest"
+                    else f"{obj.color} {obj.shape}"
+                )
+                self._voice_status = f"voice: GRAB {name} — steer close"
+            elif a is CommandAction.RELEASE:
+                self._unlock_grasp()
+                self._voice_target = None
+                self._voice_status = "voice: released"
+            elif a is CommandAction.NEUTRAL:
+                if not self.grasp_locked:
+                    self.smoothed_cursor = np.zeros(2, dtype=np.float32)
+                    self.smoothed_baseline = NEUTRAL_LEN
+                    self.current_ctrl = np.full(3, NEUTRAL_LEN, dtype=np.float32)
+                    self._reset_motion_filters()
+                self._voice_status = "voice: neutral"
+            elif a is CommandAction.STOP:
+                self._voice_target = None
+                self._voice_status = "voice: standby"
+            else:
+                self._voice_status = (
+                    f"voice: '{a.value}' is autonomous — use run_voice_sim.py"
+                )
+
+    def _voice_assisted_grasp(self) -> Optional[str]:
+        """Lock the armed voice target once the hand steers the tip in range."""
+        if self._voice_target is None or self.grasp_locked:
+            return None
+        tip = self.mj_data.site_xpos[self.tip_site_id]
+        if self._voice_target == "nearest":
+            _, dist = self._nearest_object()
+            if dist <= AUTO_WRAP_DIST:
+                self._try_lock_grasp()
+                self._voice_target = None
+                self._voice_status = "VOICE GRASP locked"
+                return self._voice_status
+            return None
+        d = float(
+            np.linalg.norm(tip - self.mj_data.xpos[self._voice_target.body_id])
+        )
+        if d <= AUTO_WRAP_DIST:
+            msg = (
+                f"VOICE GRASP: {self._voice_target.color} "
+                f"{self._voice_target.shape}"
+            )
+            self._try_lock_grasp(preferred_bid=self._voice_target.body_id)
+            self._voice_target = None
+            self._voice_status = msg
+            return msg
+        return None
 
     # ── Work-envelope enforcement ──────────────────────────────────────────────
 
@@ -746,6 +847,12 @@ class HandSimController:
                     # No frame yet; show blank and skip
                     time.sleep(0.01)
                     continue
+
+                # ── Voice co-pilot: discrete commands + assisted grasp ────────
+                self._drain_voice_commands()
+                voice_msg = self._voice_assisted_grasp()
+                if voice_msg:
+                    status_msg = voice_msg
 
                 # ── Real-Time Gesture & Fluid Control ─────────────────────────
                 # Freshness gate: the camera mailbox keeps the last sample
@@ -979,6 +1086,19 @@ class HandSimController:
                     int(round(self._pinch_hold.progress * FIST_LOCK_FRAMES)),
                 )
 
+                # Voice co-pilot status line (below the HUD block)
+                if self._voice_queue is not None and self._voice_status:
+                    cv2.putText(
+                        frame,
+                        self._voice_status,
+                        (10, 142),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45,
+                        (80, 220, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
+
                 # Movement arrow from wrist
                 # GREEN = free tracking  |  ORANGE = carrying (still steerable)
                 if wrist_pix is not None:
@@ -1146,6 +1266,7 @@ def run_hand_controller(
     filter_mode: str = "one-euro",
     min_cutoff: float = CURSOR_MIN_CUTOFF,
     beta: float = CURSOR_BETA,
+    voice: Optional[str] = None,
 ):
     """Launch the threaded hand controller."""
     HandSimController(
@@ -1157,4 +1278,5 @@ def run_hand_controller(
         filter_mode=filter_mode,
         min_cutoff=min_cutoff,
         beta=beta,
+        voice=voice,
     ).run()

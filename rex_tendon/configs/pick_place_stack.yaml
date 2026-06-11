@@ -34,7 +34,12 @@ pick_place:
     grasp_requires_contact: false
     grasp_distance_threshold: 0.035
     grasp_consecutive_steps: 2
-    grasp_carry_offset: 0.015
+    # Carry depth: the tip's contact sphere is 8 mm; at 0.015 the carried
+    # cube's top sat 3 mm INSIDE it, so the per-step assist snap re-created
+    # penetration and the contact impulses shook the arm — run-4 logs show
+    # carried cubes flung to 0.65-0.77 m from the slot. 0.025 keeps the cube
+    # 7 mm clear of the sphere.
+    grasp_carry_offset: 0.025
     # PLACEMENT ACCURACY (kept): the cube is released above the slot and must
     # physically land within tolerance + survive the topple check. Oracle probe:
     # 12/300 random-action carries complete a real placement -> discoverable.

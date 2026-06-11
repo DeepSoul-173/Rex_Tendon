@@ -234,6 +234,44 @@ def test_release_mode_releases_instead_of_snapping():
         env.close()
 
 
+def test_release_attempt_not_regrasped_with_hybrid_trigger():
+    """With proximity grasping the tip still hovers inside the grasp radius
+    right after a place release; the settle window must suppress re-latching
+    so the judgment can complete. Run-4 defect: every attempt was re-grasped
+    within 2 steps and withdrawn — 50% grasp rate, 0% place at 2.8M steps."""
+    env = _stacking_env(
+        grasp_requires_contact=False,  # hybrid trigger, as in the run-4 config
+        place_mode="release",
+        place_settle_steps=4,
+        place_distance_threshold=0.03,
+    )
+    try:
+        env.reset(seed=11)
+        env.model.opt.gravity[:] = 0.0  # keep the released cube parked
+        env._activate_grasp(env.active_object_idx)
+        action = np.zeros(env.action_space.shape, dtype=np.float32)
+        env.step(action)  # assist parks the cube below the tip
+        cube_pos = env._get_object_position(env.active_object_idx).copy()
+        env._set_place_zone_position(cube_pos)  # trigger release next step
+
+        _, _, _, _, info = env.step(action)
+        assert info["place_settling"] is True
+        assert info["is_grasped"] is False
+
+        judged = False
+        for _ in range(5):
+            _, _, _, _, info = env.step(action)
+            if info["place_settling"]:
+                # No re-latch while the attempt is being judged.
+                assert info["is_grasped"] is False
+            if info["cubes_placed_this_step"] or info["place_failed_this_step"]:
+                judged = True
+                break
+        assert judged  # the attempt ran to judgment instead of being withdrawn
+    finally:
+        env.close()
+
+
 def test_settle_judgment_counts_cube_resting_on_slot():
     env = _stacking_env(
         place_mode="release", place_settle_steps=3, place_distance_threshold=0.03

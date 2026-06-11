@@ -1042,8 +1042,18 @@ class TentaclePickPlaceEnv(gym.Env):
         # detector state is honest and debuggable.
         self.grasp_contact_count = self.grasp_contact_count + 1 if has_tip_object_contact else 0
 
+        # A cube whose place attempt is settling was just deliberately
+        # released: the proximity trigger must not re-latch it mid-judgment.
+        # With hybrid grasping the tip still hovers inside the proximity
+        # radius right after release, so without this gate every place
+        # attempt is re-grasped within grasp_consecutive_steps and withdrawn
+        # (run 4: 50% grasp rate, 0% place at 2.8M steps).
+        settling_own_cube = (
+            self._place_settle_countdown > 0
+            and self.active_object_idx == self._place_pending_idx
+        )
         if not self.is_grasped:
-            if grasp_signal:
+            if grasp_signal and not settling_own_cube:
                 self.grasp_proximity_count += 1
                 if (
                     self.grasp_proximity_count >= self.grasp_consecutive_steps

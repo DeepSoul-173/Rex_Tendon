@@ -43,6 +43,7 @@ import mujoco.viewer
 from mujoco import renderer
 
 from ..control.geometry import convert_2d_cursor_to_target_lengths
+from ..perception.scene_objects import discover_objects
 from .smoothing import HoldToTrigger, OneEuroFilter, SlewRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -492,6 +493,11 @@ class HandSimController:
         self.mode = mode
         self.alpha = smoothing_alpha
         self.filter_mode = filter_mode
+        self._filter_desc = (
+            f"1euro mc={min_cutoff:g} b={beta:g}"
+            if filter_mode == "one-euro"
+            else f"ema a={smoothing_alpha:g}"
+        )
 
         # MuJoCo
         self.mj_model = mujoco.MjModel.from_xml_path(xml_path)
@@ -550,27 +556,23 @@ class HandSimController:
             self.mj_model, mujoco.mjtObj.mjOBJ_SITE, "ghost_cursor"
         )
 
-        self.object_body_ids = []
-        for n in [
-            "obj_cube", "obj_cylinder", "obj_bar",
-            "obj_cube_purple", "obj_cube_yellow",
-            "obj_cube_extra_1", "obj_cube_extra_2", "obj_cube_extra_3",
-            "obj_cube_extra_4", "obj_cube_extra_5",
-        ]:
-            bid = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, n)
-            if bid >= 0:
-                self.object_body_ids.append(bid)
+        # Graspable objects discovered from the loaded scene (any obj_* body),
+        # so swapping scenes never needs a code change.
+        self.scene_objects = discover_objects(self.mj_model)
+        self.object_body_ids = [o.body_id for o in self.scene_objects]
 
-        # RL model
+        # RL-guided mode is NOT implemented: the loop below is pure direct
+        # teleoperation and never queried the loaded policy (it expects the
+        # training env's stacked observation vector, which this sim does not
+        # build). Be honest instead of silently behaving like direct mode.
         self.rl_model = None
-        if mode == "rl" and model_path:
-            try:
-                from stable_baselines3 import PPO
-
-                self.rl_model = PPO.load(model_path)
-            except Exception as e:
-                logger.warning(f"RL model load failed: {e} → direct mode.")
-                self.mode = "direct"
+        if mode == "rl":
+            logger.warning(
+                "--mode rl is not implemented in the hand controller; "
+                "falling back to DIRECT control. (Wiring the policy needs the "
+                "training env's observation pipeline — future work.)"
+            )
+            self.mode = "direct"
 
         # Camera presence
         def _cam_exists(name):
@@ -628,8 +630,10 @@ class HandSimController:
             if jnt_adr >= 0:
                 qvel_adr = self.mj_model.jnt_dofadr[jnt_adr]
 
-                # Hang the object exactly 1.2 cm below the tip
-                self._grasp_offset = np.array([0.0, 0.0, -0.012], dtype=np.float32)
+                # Hang the object 2.2 cm below the tip: clear of the tip's
+                # 8 mm contact sphere, else the per-frame snap re-creates
+                # penetration and the contact impulses jitter the arm.
+                self._grasp_offset = np.array([0.0, 0.0, -0.022], dtype=np.float32)
 
                 # Freeze the object at this exact offset
                 if qvel_adr >= 0:
@@ -970,7 +974,7 @@ class HandSimController:
                     self.grasp_locked,
                     tip_pos,
                     self.current_ctrl,
-                    self.mode,
+                    f"{self.mode} [{self._filter_desc}]",
                     status_msg,
                     int(round(self._pinch_hold.progress * FIST_LOCK_FRAMES)),
                 )

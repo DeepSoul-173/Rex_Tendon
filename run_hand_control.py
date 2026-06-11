@@ -56,7 +56,8 @@ Modes:
     parser.add_argument(
         "--model",
         default=None,
-        help="Path to trained RL model (.zip). Enables RL mode.",
+        help="Path to trained RL model (.zip). NOTE: RL-guided mode is not "
+        "implemented yet — the controller warns and runs direct control.",
     )
     parser.add_argument(
         "--camera",

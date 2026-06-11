@@ -15,8 +15,26 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from rex_tendon.control.primitives import MotionBehavior
+from rex_tendon.control.voice_commands import CommandAction, parse_intent
 
 logger = logging.getLogger(__name__)
+
+# Structured intents (control/voice_commands.py) that map onto hardware motion
+# primitives. Object-level intents (stack/place/move) need the simulator's
+# scene knowledge and are routed to run_voice_sim.py instead.
+_INTENT_TO_BEHAVIOR = {
+    CommandAction.PICK: MotionBehavior.GRAB,
+    CommandAction.RELEASE: MotionBehavior.RELEASE,
+    CommandAction.WAVE: MotionBehavior.SHAKE,
+    CommandAction.STOP: MotionBehavior.NO,
+}
+
+_SIM_ONLY_ACTIONS = {
+    CommandAction.STACK,
+    CommandAction.PLACE,
+    CommandAction.MOVE,
+    CommandAction.NEUTRAL,
+}
 
 
 @dataclass(frozen=True)
@@ -86,7 +104,23 @@ class NemoClawBridge:
         return result.stdout.strip() or f"Executed {command.action.value}"
 
     def handle_text(self, text: str) -> str:
-        """Parse and execute one text command."""
+        """Parse and execute one text command.
+
+        Structured intents are tried first (shared grammar with the sim voice
+        runner); the legacy keyword map remains as fallback for behaviors the
+        intent grammar does not cover (yes/circle/high-five).
+        """
+        intent = parse_intent(text)
+        if intent is not None:
+            behavior = _INTENT_TO_BEHAVIOR.get(intent.action)
+            if behavior is not None:
+                return self.execute(VoiceCommand(action=behavior, phrase=text))
+            if intent.action in _SIM_ONLY_ACTIONS:
+                return (
+                    f"'{intent.action.value}' is an object-level command — run "
+                    "it in the simulator: python run_voice_sim.py"
+                )
+
         command = self.parse_command(text)
         if command is None:
             return f"No supported NemoClaw command found in: {text!r}"

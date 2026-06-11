@@ -39,7 +39,11 @@ from ..training.rl.pick_place_training import (
 LIFT_HEIGHT = 0.03  # m above rest height that counts as "lifted"
 
 
-def build_env(config_path: str | None, vecnormalize_path: str | None):
+def build_env(
+    config_path: str | None,
+    vecnormalize_path: str | None,
+    stack_count: int | None = None,
+):
     """Recreate the training-time env stack for evaluation.
 
     Returns (venv, raw_env): the (possibly VecNormalize-wrapped) vec env for
@@ -53,10 +57,22 @@ def build_env(config_path: str | None, vecnormalize_path: str | None):
     # grasping + placing, matching late-training behaviour.
     counter = SimpleNamespace(value=1_000_000_000)
 
+    # Pin the object/stack count to the training condition. Without an
+    # explicit curriculum state the env falls back to num_spawned_objects
+    # (5 in the stack config) — earlier rollouts unknowingly evaluated a
+    # 5-object source tower the training run never sees.
+    n = (
+        stack_count
+        if stack_count is not None
+        else int(pp_config.env.min_spawned_objects)
+    )
+    curriculum_state = SimpleNamespace(value=n)
+
     raw_env = TentaclePickPlaceEnv(
         config=pp_config.env,
         task_config=task,
         global_step_counter=counter,
+        object_curriculum_state=curriculum_state,
     )
     venv = DummyVecEnv([lambda: Monitor(raw_env)])
 
@@ -175,6 +191,13 @@ def main() -> None:
     )
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument(
+        "--stack-count",
+        type=int,
+        default=None,
+        help="Objects in the source stack (default: the config's "
+        "min_spawned_objects — the level training starts at)",
+    )
+    parser.add_argument(
         "--stochastic", action="store_true", help="Sample actions instead of mode"
     )
     parser.add_argument(
@@ -185,7 +208,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    venv, raw_env = build_env(args.config, args.vecnormalize)
+    venv, raw_env = build_env(args.config, args.vecnormalize, args.stack_count)
     model = PPO.load(args.model, device="cpu")
 
     video_writer = video_renderer = video_camera = None

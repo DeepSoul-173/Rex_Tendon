@@ -174,7 +174,8 @@ def test_stack_config_loads_with_fix():
     assert cfg.training.ent_coef == 0.005
     assert cfg.env.grasp_requires_contact is False
     assert cfg.env.place_mode == "release"
-    assert cfg.env.place_distance_threshold == 0.03
+    # Run-7: tolerance matched to the demonstrated ~5 cm carry precision.
+    assert cfg.env.place_distance_threshold == 0.045
 
 
 def test_hold_bonus_budget_expires():

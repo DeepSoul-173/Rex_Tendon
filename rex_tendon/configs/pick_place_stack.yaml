@@ -45,7 +45,13 @@ pick_place:
     # 12/300 random-action carries complete a real placement -> discoverable.
     place_mode: release
     place_settle_steps: 6             # ~0.5 s of physics before judging
-    place_distance_threshold: 0.03    # release trigger + settled-cube tolerance
+    # Run-7 tolerance matching: run 6 proved the policy carries the cube to
+    # 5-6 cm of any commanded target (verified det+stochastic rollouts), but
+    # the 3 cm trigger sat ~2 cm inside that precision — snapshot policies
+    # hovered at the line and rarely fired. 4.5 cm puts the trigger inside
+    # the demonstrated envelope (still within the scene's 6 cm zone disc);
+    # the place bonus then tightens precision from frequent successes.
+    place_distance_threshold: 0.045   # release trigger + settled-cube tolerance
     # Holding (0.15/step) must beat hovering near the cube: cap the proximity
     # shaping at 0.1/step (default 0.25 out-paid holding at ~1 cm — run-3 flaw).
     grasp_proximity_bonus_scale: 0.1

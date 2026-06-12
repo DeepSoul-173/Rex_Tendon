@@ -28,8 +28,15 @@ def compute_joint_stiffness(
     return K_i, D_i
 
 
-def generate_tentacle_xml():
-    """Generate hardcoded tentacle MuJoCo XML model."""
+def generate_tentacle_xml(num_sections: int = 1):
+    """Generate a tendon-driven tentacle MuJoCo XML model.
+
+    num_sections=1 -> the original single-section arm (3 tendons, 2 task-DOF).
+    num_sections=2 -> two independently-actuated sections (6 tendons, 4 task-DOF):
+    each of the 3 helical tendons is split at the mid-segment into a lower and an
+    upper tendon, so the two halves bend independently and the arm can form an
+    S-curve (Stage B kinematics for reach-around / stacking).
+    """
 
     # Hardcoded configuration values
     rotation_offset_degrees = 60.0
@@ -400,40 +407,52 @@ def generate_tentacle_xml():
             },
         )
 
-    # Create tendons
+    # Section boundaries over the body chain. tendon_site_names[k] holds 2 sites
+    # (in, out) per body in body order, so body b -> flat indices [2b, 2b+1].
+    # For S sections, each helical tendon k is split into S contiguous tendons.
+    num_sections = max(1, int(num_sections))
+    last_body = n_pairs - 1  # 20
+    bounds = [round(s * last_body / num_sections) for s in range(num_sections + 1)]
+
     tendon_elem = ET.SubElement(root, "tendon")
-    for k in range(3):
-        spatial_tendon = ET.SubElement(
-            tendon_elem,
-            "spatial",
-            attrib={"name": f"tendon_{k+1}", "width": "0.001", "rgba": "1 0 0 1"},
-        )
-        for site_name in tendon_site_names[k]:
-            ET.SubElement(spatial_tendon, "site", attrib={"site": site_name})
-
-    # Create actuators
     actuator_elem = ET.SubElement(root, "actuator")
-    for k in range(3):
-        ET.SubElement(
-            actuator_elem,
-            "position",
-            attrib={
-                "name": f"actuator_{k+1}",
-                "tendon": f"tendon_{k+1}",
-                "kp": str(actuator_kp),
-                "forcerange": actuator_force_range,
-                "ctrlrange": actuator_ctrl_range,
-            },
-        )
-
-    # Create sensors
     sensor_elem = ET.SubElement(root, "sensor")
-    for k in range(3):
-        ET.SubElement(
-            sensor_elem,
-            "tendonpos",
-            attrib={"name": f"tendon{k+1}_pos", "tendon": f"tendon_{k+1}"},
-        )
+
+    tendon_idx = 0
+    for s in range(num_sections):
+        body_lo, body_hi = bounds[s], bounds[s + 1]
+        # A section tendon spans only part of the arm, so its natural length (and
+        # thus ctrlrange) scales with the section's fraction of the body chain;
+        # otherwise rest length exceeds the tendon and the actuator goes slack.
+        frac = (body_hi - body_lo) / float(last_body) if last_body else 1.0
+        sec_ctrl_range = f"{ctrlrange_min * frac:.4f} {ctrlrange_max * frac:.4f}"
+        for k in range(3):
+            tendon_idx += 1
+            tendon_name = f"tendon_{tendon_idx}"
+            spatial_tendon = ET.SubElement(
+                tendon_elem,
+                "spatial",
+                attrib={"name": tendon_name, "width": "0.001", "rgba": "1 0 0 1"},
+            )
+            for site_name in tendon_site_names[k][2 * body_lo : 2 * body_hi + 2]:
+                ET.SubElement(spatial_tendon, "site", attrib={"site": site_name})
+
+            ET.SubElement(
+                actuator_elem,
+                "position",
+                attrib={
+                    "name": f"actuator_{tendon_idx}",
+                    "tendon": tendon_name,
+                    "kp": str(actuator_kp),
+                    "forcerange": actuator_force_range,
+                    "ctrlrange": sec_ctrl_range,
+                },
+            )
+            ET.SubElement(
+                sensor_elem,
+                "tendonpos",
+                attrib={"name": f"tendon{tendon_idx}_pos", "tendon": tendon_name},
+            )
 
     # Contact exclusions
     if generate_contacts:
@@ -451,14 +470,109 @@ def generate_tentacle_xml():
     return reparsed.toprettyxml(indent="  ")
 
 
+def make_two_section_scene(
+    in_path: str,
+    out_path: str,
+    split_body: int = 10,
+    ctrl_min: float = 0.06,
+    ctrl_max: float = 0.17,
+) -> None:
+    """Transform a single-section pick-place scene into a 2-section (4-DOF) one.
+
+    Splits each of the 3 helical tendons at ``split_body`` into a lower + upper
+    tendon (6 tendons / actuators, per-section ctrlrange), preserving the rest of
+    the scene (desk, objects, base-yaw, cameras) verbatim. Tendon numbering
+    matches the generator: tendons 1-3 = lower section, 4-6 = upper section.
+    """
+    import re
+
+    text = Path(in_path).read_text()
+
+    # --- rewrite the <tendon> block ---
+    tendon_block = re.search(r"<tendon>(.*?)</tendon>", text, re.DOTALL)
+    spatials = re.findall(
+        r'<spatial name="tendon_(\d+)"[^>]*>(.*?)</spatial>',
+        tendon_block.group(1),
+        re.DOTALL,
+    )
+    lower, upper = [], []  # one site-list per original helical tendon
+    for _k, sites_text in spatials:
+        names = re.findall(r'site="(site_(?:in|out)_(\d+)_\d+)"', sites_text)
+        lower.append([n for n, b in names if int(b) <= split_body])
+        upper.append([n for n, b in names if int(b) >= split_body])
+
+    def emit_tendon(idx, sites):
+        out = f'    <spatial name="tendon_{idx}" width="0.001" rgba="1 0 0 1">\n'
+        for sn in sites:
+            out += f'      <site site="{sn}"/>\n'
+        return out + "    </spatial>\n"
+
+    new_tendons = "\n"
+    idx = 0
+    for section in (lower, upper):
+        for sites in section:
+            idx += 1
+            new_tendons += emit_tendon(idx, sites)
+    new_tendons += "  "
+    text = (
+        text[: tendon_block.start()]
+        + "<tendon>"
+        + new_tendons
+        + "</tendon>"
+        + text[tendon_block.end() :]
+    )
+
+    # --- rewrite the <actuator> block: 6 tendon actuators + keep non-tendon ones ---
+    act_block = re.search(r"<actuator>(.*?)</actuator>", text, re.DOTALL)
+    non_tendon = re.findall(
+        r'<position name="(?!actuator_\d)[^"]*"[^>]*/>', act_block.group(1)
+    )
+    sec_range = f"{ctrl_min:.3f} {ctrl_max:.3f}"
+    new_acts = "\n"
+    for i in range(1, 7):
+        new_acts += (
+            f'    <position name="actuator_{i}" tendon="tendon_{i}" kp="200.0" '
+            f'forcerange="-200 0" ctrlrange="{sec_range}"/>\n'
+        )
+    for line in non_tendon:
+        new_acts += f"    {line}\n"
+    new_acts += "  "
+    text = (
+        text[: act_block.start()]
+        + "<actuator>"
+        + new_acts
+        + "</actuator>"
+        + text[act_block.end() :]
+    )
+
+    Path(out_path).write_text(text)
+
+
+@app.command(name="make-2section-scene")
+def make_2section_scene_cmd(
+    in_path: str = typer.Option(
+        "rex_assets/rex_simulation/pick_and_place_scene.xml", "--in", help="Single-section scene"
+    ),
+    out_path: str = typer.Option(
+        "rex_assets/rex_simulation/pick_and_place_scene_2section.xml", "--out", help="Output 2-section scene"
+    ),
+) -> None:
+    """Generate the 2-section (4-DOF) pick-place scene from the single-section one."""
+    make_two_section_scene(in_path, out_path)
+    console.print(f"2-section scene written: {out_path}")
+
+
 @app.command()
 def generate_xml(
     output_path: str = typer.Option(
         "rex_assets/rex_simulation/tentacle.xml", "--output-path", help="Output XML file path"
     ),
+    num_sections: int = typer.Option(
+        1, "--num-sections", help="1 = single section (3 tendons); 2 = S-curve (6 tendons, 4 DOF)"
+    ),
 ) -> None:
     """Generate MuJoCo XML model."""
-    xml_content = generate_tentacle_xml()
+    xml_content = generate_tentacle_xml(num_sections=num_sections)
     output_path = Path(output_path)
 
     with open(output_path, "w") as f:

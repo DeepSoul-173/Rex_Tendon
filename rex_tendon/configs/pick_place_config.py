@@ -1,6 +1,6 @@
 """Pick-and-place RL configuration models."""
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 from pydantic import Field
 from .base import BaseConfig
 
@@ -32,6 +32,32 @@ class PickPlaceEnvConfig(BaseConfig):
         default="place_zone", description="Name of place zone site"
     )
 
+    # Number of objects placed on the desk each reset (the rest are parked off
+    # the workspace). Fewer objects = less "nearest-cube" target thrashing and
+    # easier early learning; set to 1 to validate the pipeline end to end.
+    num_spawned_objects: int = Field(
+        default=5,
+        description="How many objects to spawn on the desk per episode (clamped to available bodies)",
+    )
+
+    # Multi-object curriculum (used by `pick-place train-multi`). When enabled and
+    # a shared curriculum counter is provided, the per-episode object count is read
+    # from that counter and ramps from min to max as the policy masters each level.
+    object_curriculum_enabled: bool = Field(
+        default=False, description="Ramp the spawned-object count over training"
+    )
+    min_spawned_objects: int = Field(
+        default=2, description="Object count at the first curriculum level"
+    )
+    max_spawned_objects: int = Field(
+        default=5, description="Object count at the final curriculum level"
+    )
+    occlusion_radius: float = Field(
+        default=0.05,
+        description="Target-clutter/occlusion proxy: another object within this XY "
+        "radius of the active target counts the episode as occluded (state-based proxy)",
+    )
+
     # Object names (must match XML)
     object_names: List[str] = Field(
         default=["obj_cube", "obj_cylinder", "obj_bar", "obj_cube_purple", "obj_cube_yellow",
@@ -54,12 +80,28 @@ class PickPlaceEnvConfig(BaseConfig):
         description="Names of weld equality constraints for grasping",
     )
 
-    # Grasping parameters
+    # Grasping parameters (hybrid trigger: real tip contact OR close proximity)
     grasp_distance_threshold: float = Field(
-        default=0.10, description="Distance threshold for grasping (meters) - increased for easier learning"
+        default=0.05,
+        description="Proximity grasp-trigger distance (m). Primary grasp sensitivity knob: the "
+        "tip latches the object when its centre is within this distance, or on real contact.",
+    )
+    grasp_contact_force_threshold: float = Field(
+        default=1e-3,
+        description="Minimum tip-object normal force (N) that counts as real contact for a grasp trigger.",
     )
     grasp_consecutive_steps: int = Field(
-        default=2, description="Consecutive steps within threshold to trigger grasp"
+        default=2, description="Consecutive steps with a grasp signal required to latch a grasp"
+    )
+    grasp_release_grace_steps: int = Field(
+        default=2,
+        description="Steps without a contact/proximity signal before an unassisted grasp is released",
+    )
+    grasp_carry_offset: Optional[float] = Field(
+        default=None,
+        description="If set, a grasped object is snapped to this fixed distance (m) "
+        "below the tip (fingertip grip) instead of freezing the proximity offset; "
+        "makes the carry look like a real contact pickup rather than a floating crutch",
     )
     place_distance_threshold: float = Field(
         default=0.10, description="Distance threshold for successful placement (meters)"
@@ -81,6 +123,11 @@ class PickPlaceEnvConfig(BaseConfig):
     drop_penalty: float = Field(
         default=3.0, description="Penalty for dropping object"
     )
+    time_penalty: float = Field(
+        default=0.0,
+        description="Per-step living cost; encourages finishing (placing) promptly "
+        "rather than hovering to farm shaping rewards",
+    )
     action_change_penalty_scale: float = Field(
         default=0.1, description="Scale for action change penalty"
     )
@@ -88,12 +135,75 @@ class PickPlaceEnvConfig(BaseConfig):
         default=0.0, description="Scale for second-order action change penalty"
     )
     object_progress_reward_scale: float = Field(
+        default=1.0,
+        description="Potential-based reward scale for a grasped object's progress toward the "
+        "place zone (dense signal that makes the full place task learnable).",
+    )
+    carry_reach_reward_scale: float = Field(
         default=0.0,
-        description="Reward scale for object progress toward the place zone",
+        description="Carry-phase analog of the reach reward: while grasped, penalize the "
+        "tip's distance to the place target (-scale * tip_to_place). Fills the gradient "
+        "dead zone after grasping, when tip_to_obj is ~0 and the reach term goes flat.",
+    )
+    grasp_hold_bonus: float = Field(
+        default=0.0,
+        description="Per-step bonus while holding an object. With contact-gated "
+        "grasping, holding must pay more than hovering near the cube (the proximity "
+        "bonus), otherwise an absolute carry penalty teaches the policy to avoid "
+        "contact altogether — observed on the 2026-06-10 retrain (grasp rate "
+        "10% -> 0%). Keep it below place_bonus / episode_steps so finishing "
+        "still dominates holding forever.",
+    )
+    grasp_hold_bonus_budget_steps: int = Field(
+        default=0,
+        description="Per-EPISODE cap on hold-bonus steps (0 = unlimited/legacy). "
+        "Without a budget the hold flow is farmable: run 5 (12M steps) converged "
+        "to grasp -> drag to base -> coil up and collect +0.15/step forever "
+        "(discounting makes the distant place bonus uncompetitive).",
+    )
+    grasp_bonus_first_only: bool = Field(
+        default=False,
+        description="Pay grasp_bonus only for the episode's first grasp; "
+        "blocks release/re-grasp bonus cycling.",
+    )
+    stack_target_randomize: bool = Field(
+        default=False,
+        description="Stacking: sample the target location per episode instead of "
+        "the fixed task target_xy. Near targets make the carry discoverable; the "
+        "policy is goal-conditioned (place_pos is observed), so skill at near "
+        "goals transfers to far ones.",
+    )
+    stack_target_radius: Tuple[float, float] = Field(
+        default=(0.05, 0.10),
+        description="stack_target_randomize: target distance range from the arm "
+        "base (polar sampling, any azimuth, rejected within 4 cm of the source).",
+    )
+    # Grasp/place accuracy (trust of reported success)
+    grasp_requires_contact: bool = Field(
+        default=False,
+        description="Accuracy mode: only real force-bearing tip/object contact can latch "
+        "a grasp. Default False keeps the legacy hybrid trigger, where proximity alone "
+        "(tip within grasp_distance_threshold) also counts.",
+    )
+    place_mode: Literal["snap", "release"] = Field(
+        default="snap",
+        description="Stacking placement: 'snap' teleports the carried cube onto the slot "
+        "when within place_distance_threshold (legacy); 'release' opens the grasp above "
+        "the slot and lets physics settle the cube — placement counts only if the cube "
+        "comes to rest within the threshold (and the stack survives the topple check).",
+    )
+    place_settle_steps: int = Field(
+        default=6,
+        description="place_mode='release' only: env steps to wait after releasing before "
+        "judging whether the cube settled onto the slot.",
     )
     stable_contact_bonus_scale: float = Field(
         default=0.0,
         description="Small bonus scale for maintaining close tip/object contact",
+    )
+    grasp_proximity_bonus_scale: float = Field(
+        default=0.25,
+        description="Shaping bonus scale for settling the tip into grasp range before it latches",
     )
     # Assisted Grasping (Magnetic-like grip)
     assisted_grasp_enabled: bool = Field(
@@ -132,13 +242,16 @@ class PickPlaceEnvConfig(BaseConfig):
         description="Include active object linear velocity estimate in observation",
     )
 
-    # Object spawn bounds (where objects can be randomly placed on desk)
+    # Object spawn bounds (where objects can be randomly placed on desk).
+    # NOTE: the tendon tip's reachable workspace is an annulus of radius
+    # ~0.075-0.13 m around the base; spawns outside it can never be reached or
+    # grasped. Keep the box corners (|x|,|y|) within ~0.13 m radius.
     object_spawn_bounds_min: List[float] = Field(
-        default=[-0.1, -0.1, -0.025],
+        default=[-0.09, -0.09, 0.0],
         description="Minimum XYZ bounds for object spawning",
     )
     object_spawn_bounds_max: List[float] = Field(
-        default=[0.1, 0.1, -0.025],
+        default=[0.09, 0.09, 0.0],
         description="Maximum XYZ bounds for object spawning",
     )
 
@@ -194,6 +307,20 @@ class PickPlaceTaskConfig(BaseConfig):
     )
     randomize_object_position: bool = Field(
         default=True, description="Randomize object positions on reset"
+    )
+
+    # --- Stacking task (Stage B): pick a source stack apart and rebuild it ---
+    stacking: bool = Field(
+        default=False, description="Enable the stacking task (vs single place)"
+    )
+    stack_count: int = Field(
+        default=2, description="Number of cubes to stack (curriculum-controlled)"
+    )
+    source_xy: Optional[Tuple[float, float]] = Field(
+        default=(0.08, 0.0), description="XY of the source stack the cubes start in"
+    )
+    target_xy: Optional[Tuple[float, float]] = Field(
+        default=(-0.08, 0.0), description="XY of the target stack to build"
     )
 
 

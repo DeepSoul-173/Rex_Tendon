@@ -1,0 +1,27 @@
+vision_training:
+  # Fine-tune on the synthetic cube dataset (training/vision/generate_synthetic_data.py).
+  # Local yolov8n.pt weights (COCO-pretrained) avoid a network download.
+  base_model: "yolov8n.pt"
+
+  epochs: 30
+  image_size: 480          # matches the scene's offscreen framebuffer limit
+  batch_size: 8
+  device: "cpu"
+
+  project_name: "yolo_training"
+  experiment_name: "cubes_synth"
+
+  # ONNX export is a deployment step; skip during iteration.
+  export_to_onnx: false
+  onnx_optimize: true
+  onnx_dynamic: true
+  onnx_simplify: true
+
+  additional_params:
+    patience: 10
+    save_period: 5
+    workers: 4
+    optimizer: "auto"
+    lr0: 0.01
+    momentum: 0.937
+    weight_decay: 0.0005

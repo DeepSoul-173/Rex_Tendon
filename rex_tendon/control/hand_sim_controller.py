@@ -1,9 +1,12 @@
 """Real-time webcam hand control for the MuJoCo tentacle simulation.
 
-Control Scheme
---------------
-  Wrist horizontal position (L/R)   : Move robot tip Left / Right
-  Wrist vertical position (U/D)     : Move robot tip Up / Down
+Control Scheme (decoupled channels)
+-----------------------------------
+  Wrist horizontal position (L/R)   : Bend robot tip Left / Right
+  Wrist vertical position (U/D)     : Bend robot tip Up / Down
+  Twist / roll the hand             : Rotate the base (yaw) — true twist DOF,
+                                      active only when the model has a base-yaw
+                                      actuator; smooth/slow by design.
   Hand depth (bbox size in frame)   : Z extension — closer=extend, farther=retract
   Flat open palm (low z_variance)   : Return robot to neutral position
   Pinch THUMB + INDEX (hold ~6 fr)  : LOCK grasp on nearest object
@@ -27,6 +30,7 @@ Work Envelope
   is restored before the next physics step.
 """
 
+import queue
 import threading
 import time
 import logging
@@ -40,6 +44,10 @@ import mujoco.viewer
 from mujoco import renderer
 
 from ..control.geometry import convert_2d_cursor_to_target_lengths
+from ..perception.scene_objects import discover_objects, find_by_color
+from .smoothing import HoldToTrigger, OneEuroFilter, SlewRateLimiter
+from .voice_commands import CommandAction, parse_intent
+from .voice_io import start_input_thread
 
 logger = logging.getLogger(__name__)
 
@@ -58,15 +66,43 @@ FLAT_OPEN_CURL_MIN = 0.42
 FLAT_PALM_FRAMES = 4
 
 # ── Cursor mapping ────────────────────────────────────────────────────────────
-# Absolute-position mode: frame [0,1] → workspace [-1,1].  No calibration needed
-# for direction; 'C' only sets the Z (depth) baseline.
-DEAD_ZONE = 0.015
-POS_GAIN = 2.15
+# Absolute wrist-position mode: the wrist's location in the (mirrored) frame maps
+# directly to the tip cursor, so moving your hand moves the robot.  'C' recenters
+# the neutral hand position and sets the Z (depth) baseline.
+DEAD_ZONE = 0.03  # normalized frame units around neutral that map to "no motion"
+POS_GAIN = 3.2  # how far the tip swings per unit of wrist travel across the frame
 DEPTH_GAIN = 4.0
+# Hand-roll → base-yaw (true twist). When the model has a base-yaw actuator,
+# rolling/twisting the hand rotates the whole tentacle about the vertical axis.
+# This is decoupled from position control (which drives the bend), so the two
+# are independent and easy to steer.
+YAW_GAIN = 2.4  # base-yaw radians per radian of hand roll (clamped to joint range)
+YAW_SMOOTH = 0.25  # low-pass alpha for the yaw target (stability)
+DEAD_ROLL = 0.06  # hand-roll dead-zone (radians)
 
 # ── Motion safety ─────────────────────────────────────────────────────────────
-MAX_TENDON_DEV = 0.070
-MAX_CTRL_STEP = 0.020
+MAX_TENDON_DEV = 0.070  # max tendon offset from baseline (caps bend amount)
+# Tendon slew cap in m/s. Tuned by feel, NOT derived from the old per-frame
+# cap: the webcam+MediaPipe loop runs at ~15-25 fps on a laptop (not the 60 fps
+# design target), and a "60 fps equivalent" rate of 1.8 m/s allowed 3x faster
+# tendon motion per real frame than the old controller — felt jerky and threw
+# objects. 0.8 m/s is calm at any frame rate; raise via --max-rate if sluggish.
+MAX_CTRL_RATE = 0.8
+STALE_CAM_TIMEOUT = 0.5  # s without a fresh camera sample → hold position
+
+# ── Cursor filtering (one-euro mode) ──────────────────────────────────────────
+# Adaptive smoothing: calm when the hand is still, near-direct when it moves
+# fast. min_cutoff (Hz): lower = steadier at rest, laggier on slow drift.
+# beta: higher = less lag during fast motion. "ema" mode keeps the legacy
+# fixed-alpha filter as the A/B baseline.
+CURSOR_MIN_CUTOFF = 1.0
+CURSOR_BETA = 0.15
+YAW_MIN_CUTOFF = 1.0  # yaw is deliberately slower than the bend cursor
+YAW_BETA = 0.2
+
+# ── Gesture timing (seconds; was frame counts at the 60 fps target) ──────────
+FIST_LOCK_TIME = FIST_LOCK_FRAMES / 60.0
+FLAT_PALM_TIME = FLAT_PALM_FRAMES / 60.0
 
 # ── Work envelope ─────────────────────────────────────────────────────────────
 TABLE_X_MAX = 0.21
@@ -295,43 +331,42 @@ def _extract_features(hand_lm, frame_shape):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _map_cursor(features: dict, bbox_center: float, neutral_xy: np.ndarray) -> tuple:
-    """Convert target_yaw / target_pitch to robot cursor + depth baseline.
+def _wrap_angle(angle: float) -> float:
+    """Wrap an angle to (-pi, pi]."""
+    return (angle + np.pi) % (2.0 * np.pi) - np.pi
 
-    Mapping (all absolute, no calibration needed):
-      target_yaw  →  cursor_x in [-1, +1]
-      target_pitch  →  cursor_y in [+1, -1]  (inverted: up=+)
 
-    Roll-angle rotation is intentionally DISABLED — it caused the whole
-    control axis to rotate when the user tilted their hand, making direction
-    fight intuition.
+def _map_cursor(
+    features: dict, bbox_center: float, neutral_xy: np.ndarray
+) -> tuple:
+    """Convert the wrist's frame position to a robot cursor + depth baseline.
+
+    Pure position control, decoupled from twist (which drives the base yaw):
+      wrist_x (0=left, 1=right; frame is mirrored)  →  cursor_x in [-1, +1]
+      wrist_y (0=top,  1=bottom)                    →  cursor_y in [+1, -1]  (up=+)
+
+    'neutral_xy' is the calibrated hand centre ('C' key; default frame centre).
 
     Returns:
         cursor   : np.ndarray [x, y] in [-1, 1]
         baseline : float tendon length in [ACTUATOR_LO, ACTUATOR_HI]
     """
-    # Map movement relative to calibrated neutral hand orientation.
-    raw_x = (features["target_yaw"] - neutral_xy[0]) * 2.0  # + = right
-
-    # Map target_pitch to Y-axis (screen Y inverted).
-    raw_y = -(features["target_pitch"] - neutral_xy[1]) * 2.0  # + = up
-
-    magnitude = np.sqrt(raw_x**2 + raw_y**2)
-    if magnitude < DEAD_ZONE:
+    dx = float(features["wrist_x"]) - float(neutral_xy[0])  # + = hand moved right
+    dy = -(float(features["wrist_y"]) - float(neutral_xy[1]))  # + = hand moved up
+    dist = float(np.hypot(dx, dy))
+    if dist < DEAD_ZONE:
         cursor = np.zeros(2, dtype=np.float32)
     else:
-        # Smooth ramp from dead-zone edge; preserve direction
-        effective = (magnitude - DEAD_ZONE) / max(1.0 - DEAD_ZONE, 1e-6)
-        scaled = min(effective * POS_GAIN, 1.0)  # soft cap at 1.0
-        cursor = np.array(
-            [raw_x / magnitude * scaled, raw_y / magnitude * scaled],
-            dtype=np.float32,
-        )
+        cx = dx * POS_GAIN
+        cy = dy * POS_GAIN
+        mag = float(np.hypot(cx, cy))
+        if mag > 1.0:
+            cx, cy = cx / mag, cy / mag
+        cursor = np.array([cx, cy], dtype=np.float32)
 
     # Depth: bbox_area change from calibrated baseline.
     t = np.clip(0.5 + (features["bbox_area"] - bbox_center) * DEPTH_GAIN, 0.0, 1.0)
     baseline = float(ACTUATOR_LO + t * (ACTUATOR_HI - ACTUATOR_LO))
-
     return cursor, baseline
 
 
@@ -454,9 +489,24 @@ class HandSimController:
         camera_id: int = 0,
         mode: str = "direct",
         smoothing_alpha: float = 0.90,
+        filter_mode: str = "one-euro",
+        min_cutoff: float = CURSOR_MIN_CUTOFF,
+        beta: float = CURSOR_BETA,
+        max_ctrl_rate: float = MAX_CTRL_RATE,
+        voice: Optional[str] = None,  # None | "typed" | "speech"
     ):
+        if filter_mode not in ("one-euro", "ema"):
+            raise ValueError(
+                f"filter_mode must be 'one-euro' or 'ema', got {filter_mode!r}"
+            )
         self.mode = mode
         self.alpha = smoothing_alpha
+        self.filter_mode = filter_mode
+        self._filter_desc = (
+            f"1euro mc={min_cutoff:g} b={beta:g}"
+            if filter_mode == "one-euro"
+            else f"ema a={smoothing_alpha:g}"
+        )
 
         # MuJoCo
         self.mj_model = mujoco.MjModel.from_xml_path(xml_path)
@@ -469,27 +519,43 @@ class HandSimController:
             self.mj_model, width=PIP_W * 2, height=PIP_H * 2
         )
 
-        self.act_low = self.mj_model.actuator_ctrlrange[:, 0]
-        self.act_high = self.mj_model.actuator_ctrlrange[:, 1]
+        # Tendon actuators are the first 3. An optional 4th actuator is the
+        # base yaw (true twist); the controller adapts to its presence.
+        self.act_low = self.mj_model.actuator_ctrlrange[:3, 0]
+        self.act_high = self.mj_model.actuator_ctrlrange[:3, 1]
+        self._has_yaw = int(self.mj_model.nu) >= 4
+        if self._has_yaw:
+            self._yaw_lo = float(self.mj_model.actuator_ctrlrange[3, 0])
+            self._yaw_hi = float(self.mj_model.actuator_ctrlrange[3, 1])
+        else:
+            self._yaw_lo, self._yaw_hi = -1.5708, 1.5708
+        self._smoothed_yaw = 0.0
 
         # Control state
         self.current_ctrl = np.full(3, NEUTRAL_LEN, dtype=np.float32)
         self._last_valid_ctrl = self.current_ctrl.copy()
-        self._prev_ctrl = self.current_ctrl.copy()  # for rate limiting
         self.smoothed_cursor = np.zeros(2, dtype=np.float32)
         self.smoothed_baseline = NEUTRAL_LEN
-        self.mj_data.ctrl[:] = self.current_ctrl
+        self._write_ctrl()
+
+        # dt-aware signal conditioning (see smoothing.py)
+        self._cursor_filter = OneEuroFilter(min_cutoff=min_cutoff, beta=beta)
+        self._baseline_filter = OneEuroFilter(min_cutoff=min_cutoff, beta=beta)
+        self._yaw_filter = OneEuroFilter(min_cutoff=YAW_MIN_CUTOFF, beta=YAW_BETA)
+        self._ctrl_slew = SlewRateLimiter(max_ctrl_rate)
+        self._ctrl_slew.reset(self.current_ctrl)
 
         self.grasp_locked = False
         self.grasped_bid = -1
-        self._fist_counter = 0
-        self._flat_counter = 0
+        self._pinch_hold = HoldToTrigger(FIST_LOCK_TIME)
+        self._flat_hold = HoldToTrigger(FLAT_PALM_TIME)
         self._pinch_was_open = True
         self._grasp_offset = np.zeros(3, dtype=np.float32)
 
         # Depth calibration only (wrist position does not need calibration)
         self._bbox_center = 0.05  # updated on 'C'
         self._neutral_xy = np.array([0.5, 0.5], dtype=np.float32)
+        self._neutral_roll: Optional[float] = None  # captured on first hand / 'C'
 
         # Site / object IDs
         self.tip_site_id = mujoco.mj_name2id(
@@ -499,27 +565,23 @@ class HandSimController:
             self.mj_model, mujoco.mjtObj.mjOBJ_SITE, "ghost_cursor"
         )
 
-        self.object_body_ids = []
-        for n in [
-            "obj_cube", "obj_cylinder", "obj_bar",
-            "obj_cube_purple", "obj_cube_yellow",
-            "obj_cube_extra_1", "obj_cube_extra_2", "obj_cube_extra_3",
-            "obj_cube_extra_4", "obj_cube_extra_5",
-        ]:
-            bid = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, n)
-            if bid >= 0:
-                self.object_body_ids.append(bid)
+        # Graspable objects discovered from the loaded scene (any obj_* body),
+        # so swapping scenes never needs a code change.
+        self.scene_objects = discover_objects(self.mj_model)
+        self.object_body_ids = [o.body_id for o in self.scene_objects]
 
-        # RL model
+        # RL-guided mode is NOT implemented: the loop below is pure direct
+        # teleoperation and never queried the loaded policy (it expects the
+        # training env's stacked observation vector, which this sim does not
+        # build). Be honest instead of silently behaving like direct mode.
         self.rl_model = None
-        if mode == "rl" and model_path:
-            try:
-                from stable_baselines3 import PPO
-
-                self.rl_model = PPO.load(model_path)
-            except Exception as e:
-                logger.warning(f"RL model load failed: {e} → direct mode.")
-                self.mode = "direct"
+        if mode == "rl":
+            logger.warning(
+                "--mode rl is not implemented in the hand controller; "
+                "falling back to DIRECT control. (Wiring the policy needs the "
+                "training env's observation pipeline — future work.)"
+            )
+            self.mode = "direct"
 
         # Camera presence
         def _cam_exists(name):
@@ -530,8 +592,36 @@ class HandSimController:
         self._has_robot_cam = _cam_exists("robot_cam")
         self._has_corner_cam = _cam_exists("table_corner_cam")
 
+        # Voice co-pilot: hand steers continuous motion, voice handles the
+        # discrete decisions (grab <color> / release / neutral / stop).
+        self._voice_queue: Optional[queue.Queue] = None
+        self._voice_target = None  # SceneObject armed for voice-assisted grasp
+        self._voice_status = ""
+        if voice in ("typed", "speech"):
+            self._voice_queue = queue.Queue()
+            self._voice_status = "voice co-pilot starting..."
+            # Mic ON/OFF status lands on the HUD via _voice_status.
+            start_input_thread(
+                self._voice_queue,
+                mode=voice,
+                status_cb=lambda msg: setattr(self, "_voice_status", msg),
+            )
+
         self.camera_id = camera_id
         mujoco.mj_forward(self.mj_model, self.mj_data)
+
+    def _write_ctrl(self) -> None:
+        """Write tendon ctrl (and base-yaw ctrl if the model has that DOF)."""
+        self.mj_data.ctrl[:3] = self.current_ctrl
+        if self._has_yaw:
+            self.mj_data.ctrl[3] = self._smoothed_yaw
+
+    def _reset_motion_filters(self) -> None:
+        """Clear filter state so motion resumes cleanly from current_ctrl."""
+        self._cursor_filter.reset()
+        self._baseline_filter.reset()
+        self._yaw_filter.reset()
+        self._ctrl_slew.reset(self.current_ctrl)
 
     # ── Grasp helpers ──────────────────────────────────────────────────────────
 
@@ -544,19 +634,24 @@ class HandSimController:
                 best_d, best_bid = d, bid
         return best_bid, best_d
 
-    def _try_lock_grasp(self):
+    def _try_lock_grasp(self, preferred_bid: int = -1):
         if self.grasp_locked:
             return
         self.grasp_locked = True
-        self._fist_counter = 0
+        self._pinch_hold.reset()
         self._pinch_was_open = False
 
         bid, dist = self._nearest_object()
         tip_pos = self.mj_data.site_xpos[self.tip_site_id].copy()
+        if preferred_bid >= 0:
+            p_dist = float(
+                np.linalg.norm(tip_pos - self.mj_data.xpos[preferred_bid])
+            )
+            if p_dist <= AUTO_WRAP_DIST:
+                bid, dist = preferred_bid, p_dist
 
         if dist <= AUTO_WRAP_DIST and bid >= 0:
             self.grasped_bid = bid
-            obj_pos = self.mj_data.xpos[bid].copy()
 
             # Snap object neatly beneath the tip to avoid collision explosion.
             # A fixed offset ensures it doesn't float far away if grabbed from a distance.
@@ -564,27 +659,19 @@ class HandSimController:
             if jnt_adr >= 0:
                 qvel_adr = self.mj_model.jnt_dofadr[jnt_adr]
 
-                # Hang the object exactly 1.2 cm below the tip
-                self._grasp_offset = np.array([0.0, 0.0, -0.012], dtype=np.float32)
+                # Hang the object 2.2 cm below the tip: clear of the tip's
+                # 8 mm contact sphere, else the per-frame snap re-creates
+                # penetration and the contact impulses jitter the arm.
+                self._grasp_offset = np.array([0.0, 0.0, -0.022], dtype=np.float32)
 
                 # Freeze the object at this exact offset
                 if qvel_adr >= 0:
                     self.mj_data.qvel[qvel_adr : qvel_adr + 6] = 0.0
 
-            # NOTE: we do NOT change smoothed_cursor or smoothed_baseline here.
-            # The hand tracking continues driving the robot immediately after lock,
-            # so the user can steer while carrying.  Only current_ctrl is pre-bent.
-            dx = obj_pos[0] - tip_pos[0]
-            dy = obj_pos[1] - tip_pos[1]
-            dist_xy = np.sqrt(dx**2 + dy**2)
-            if dist_xy > 1e-4:
-                wrap_dir = np.array([dx / dist_xy, dy / dist_xy], dtype=np.float32)
-                bl_arr = np.full(3, self.smoothed_baseline, dtype=np.float32)
-                self.current_ctrl = convert_2d_cursor_to_target_lengths(
-                    wrap_dir, bl_arr, self.act_low, self.act_high, 1.0
-                )
-                self._last_valid_ctrl = self.current_ctrl.copy()
-                # smoothed_cursor intentionally NOT updated — hand resumes control
+            # No pre-bend: the old "wrap pose" overwrote current_ctrl in a
+            # single frame, bypassing the slew limiter — a violent jerk on
+            # every grasp. The hand keeps continuous control; the snap-carry
+            # alone provides the hold.
 
             logger.info(f"Grasp LOCKED + auto-wrap → dist={dist:.3f} m")
         else:
@@ -596,9 +683,90 @@ class HandSimController:
             return
         self.grasp_locked = False
         self.grasped_bid = -1
-        self._fist_counter = 0
+        self._pinch_hold.reset()
         self._grasp_offset = np.zeros(3, dtype=np.float32)
         logger.info("Grasp UNLOCKED.")
+
+    # ── Voice co-pilot ─────────────────────────────────────────────────────────
+
+    def _drain_voice_commands(self) -> None:
+        """Apply queued voice commands — discrete decisions only; the hand
+        keeps continuous control of motion."""
+        if self._voice_queue is None:
+            return
+        while True:
+            try:
+                text = self._voice_queue.get_nowait()
+            except queue.Empty:
+                return
+            intent = parse_intent(text)
+            if intent is None:
+                self._voice_status = f"voice: didn't get '{text.strip()}'"
+                continue
+            a = intent.action
+            if a is CommandAction.PICK:
+                obj = (
+                    find_by_color(self.scene_objects, intent.target_color)
+                    if intent.target_color
+                    else "nearest"
+                )
+                if obj is None:
+                    self._voice_status = (
+                        f"voice: no {intent.target_color} object in this scene"
+                    )
+                    continue
+                self._voice_target = obj
+                name = (
+                    "nearest object"
+                    if obj == "nearest"
+                    else f"{obj.color} {obj.shape}"
+                )
+                self._voice_status = f"voice: GRAB {name} — steer close"
+            elif a is CommandAction.RELEASE:
+                self._unlock_grasp()
+                self._voice_target = None
+                self._voice_status = "voice: released"
+            elif a is CommandAction.NEUTRAL:
+                if not self.grasp_locked:
+                    self.smoothed_cursor = np.zeros(2, dtype=np.float32)
+                    self.smoothed_baseline = NEUTRAL_LEN
+                    self.current_ctrl = np.full(3, NEUTRAL_LEN, dtype=np.float32)
+                    self._reset_motion_filters()
+                self._voice_status = "voice: neutral"
+            elif a is CommandAction.STOP:
+                self._voice_target = None
+                self._voice_status = "voice: standby"
+            else:
+                self._voice_status = (
+                    f"voice: '{a.value}' is autonomous — use run_voice_sim.py"
+                )
+
+    def _voice_assisted_grasp(self) -> Optional[str]:
+        """Lock the armed voice target once the hand steers the tip in range."""
+        if self._voice_target is None or self.grasp_locked:
+            return None
+        tip = self.mj_data.site_xpos[self.tip_site_id]
+        if self._voice_target == "nearest":
+            _, dist = self._nearest_object()
+            if dist <= AUTO_WRAP_DIST:
+                self._try_lock_grasp()
+                self._voice_target = None
+                self._voice_status = "VOICE GRASP locked"
+                return self._voice_status
+            return None
+        d = float(
+            np.linalg.norm(tip - self.mj_data.xpos[self._voice_target.body_id])
+        )
+        if d <= AUTO_WRAP_DIST:
+            msg = (
+                f"VOICE GRASP: {self._voice_target.color} "
+                f"{self._voice_target.shape}"
+            )
+            self._try_lock_grasp(preferred_bid=self._voice_target.body_id)
+            self._voice_target = None
+            self._voice_status = msg
+            return msg
+        return None
 
     # ── Work-envelope enforcement ──────────────────────────────────────────────
 
@@ -659,9 +827,18 @@ class HandSimController:
             "THUMB+INDEX=lock  |  THUMB+MIDDLE=unlock"
         )
 
+        prev_tick: Optional[float] = None
+
         try:
             while viewer.is_running():
                 t0 = time.time()
+
+                # Measured dt feeds the dt-aware filters. Clamped so the first
+                # frame and long stalls can't blow up the velocity estimate.
+                now = time.perf_counter()
+                dt = FRAME_TIME if prev_tick is None else now - prev_tick
+                prev_tick = now
+                dt = min(max(dt, 1e-3), 0.1)
 
                 # ── Non-blocking camera read ───────────────────────────────────
                 frame, features, wrist_pix, cam_ts = cam_thread.read()
@@ -670,27 +847,48 @@ class HandSimController:
                     time.sleep(0.01)
                     continue
 
+                # ── Voice co-pilot: discrete commands + assisted grasp ────────
+                self._drain_voice_commands()
+                voice_msg = self._voice_assisted_grasp()
+                if voice_msg:
+                    status_msg = voice_msg
+
                 # ── Real-Time Gesture & Fluid Control ─────────────────────────
-                if features is not None:
+                # Freshness gate: the camera mailbox keeps the last sample
+                # forever, so a stalled cam thread would otherwise keep
+                # commanding the robot with frozen features.
+                cam_stale = (
+                    cam_ts <= 0.0
+                    or (time.perf_counter() - cam_ts) > STALE_CAM_TIMEOUT
+                )
+
+                if cam_stale:
+                    status_msg = "CAMERA STALE — holding position"
+                elif features is not None:
                     pinch = features["pinch_ratio"]
                     mid = features["thumb_middle_ratio"]
                     curl = features["avg_curl"]
                     zvar = features["z_variance"]
 
-                    # 1. Flat-palm override → go neutral
-                    if zvar < FLAT_ZVAR and curl > FLAT_OPEN_CURL_MIN:
-                        self._flat_counter += 1
-                    else:
-                        self._flat_counter = 0
+                    # Capture the neutral hand-roll once so twist is measured
+                    # relative to however the hand is first held.
+                    if self._neutral_roll is None:
+                        self._neutral_roll = float(features["roll_angle"])
+
+                    # 1. Flat-palm override → go neutral (held FLAT_PALM_TIME s)
+                    self._flat_hold.update(
+                        zvar < FLAT_ZVAR and curl > FLAT_OPEN_CURL_MIN, dt
+                    )
 
                     flat_triggered = False
-                    if self._flat_counter >= FLAT_PALM_FRAMES:
+                    if self._flat_hold.progress >= 1.0:
                         if not self.grasp_locked:
                             self.smoothed_cursor = np.zeros(2, dtype=np.float32)
                             self.smoothed_baseline = NEUTRAL_LEN
                             self.current_ctrl = np.full(
                                 3, NEUTRAL_LEN, dtype=np.float32
                             )
+                            self._reset_motion_filters()
                             flat_triggered = True
                         status_msg = "FLAT PALM → NEUTRAL"
 
@@ -705,42 +903,75 @@ class HandSimController:
                             if pinch > PINCH_OPEN_RATIO:
                                 self._pinch_was_open = True
 
-                            if pinch < PINCH_LOCK_THRESHOLD and self._pinch_was_open:
-                                self._fist_counter += 1
-
+                            pinch_active = (
+                                pinch < PINCH_LOCK_THRESHOLD and self._pinch_was_open
+                            )
+                            held_long_enough = self._pinch_hold.update(
+                                pinch_active, dt
+                            )
+                            if pinch_active:
                                 _, near_d = self._nearest_object()
                                 if near_d <= AUTO_GRASP_DIST:
                                     self._try_lock_grasp()
                                     status_msg = f"AUTO-GRASP (dist {near_d:.3f} m) 🔒"
-                                elif self._fist_counter >= FIST_LOCK_FRAMES:
+                                elif held_long_enough:
                                     self._try_lock_grasp()
                                     status_msg = "PINCH HELD → LOCKED 🔒"
                                 else:
-                                    pct = int(
-                                        100 * self._fist_counter / FIST_LOCK_FRAMES
-                                    )
+                                    pct = int(100 * self._pinch_hold.progress)
                                     status_msg = f"Charging grasp… {pct}%"
-                            else:
-                                self._fist_counter = 0
 
                         # 4. Continuous motion — "Move like water"
-                        # Always mirror hand, but with heavy filtering for fluid wave motion
+                        # Position drives the bend; hand-roll drives the base yaw.
                         cursor, baseline = _map_cursor(
                             features, self._bbox_center, self._neutral_xy
                         )
 
-                        # High alpha means "follow me now"; the tendon rate limiter
-                        # provides the remaining physical smoothing.
-                        eff_alpha = self.alpha
+                        # Hand twist → base yaw (decoupled true-twist DOF).
+                        if self._has_yaw and self._neutral_roll is not None:
+                            roll_delta = _wrap_angle(
+                                float(features["roll_angle"]) - self._neutral_roll
+                            )
+                            if abs(roll_delta) < DEAD_ROLL:
+                                roll_delta = 0.0
+                            yaw_target = float(
+                                np.clip(
+                                    -roll_delta * YAW_GAIN, self._yaw_lo, self._yaw_hi
+                                )
+                            )
+                            if self.filter_mode == "one-euro":
+                                self._smoothed_yaw = float(
+                                    self._yaw_filter.filter(yaw_target, dt)
+                                )
+                            else:
+                                self._smoothed_yaw = (
+                                    YAW_SMOOTH * yaw_target
+                                    + (1.0 - YAW_SMOOTH) * self._smoothed_yaw
+                                )
 
-                        self.smoothed_cursor = (
-                            eff_alpha * cursor
-                            + (1.0 - eff_alpha) * self.smoothed_cursor
-                        )
-                        self.smoothed_baseline = (
-                            eff_alpha * baseline
-                            + (1.0 - eff_alpha) * self.smoothed_baseline
-                        )
+                        if self.filter_mode == "one-euro":
+                            # Adaptive: calm when the hand is still (jitter
+                            # gone), near-direct when it moves fast (no lag).
+                            self.smoothed_cursor = np.asarray(
+                                self._cursor_filter.filter(cursor, dt),
+                                dtype=np.float32,
+                            )
+                            self.smoothed_baseline = float(
+                                self._baseline_filter.filter(baseline, dt)
+                            )
+                        else:
+                            # Legacy fixed-alpha EMA, kept as the A/B baseline.
+                            # High alpha means "follow me now"; the slew limiter
+                            # provides the remaining physical smoothing.
+                            eff_alpha = self.alpha
+                            self.smoothed_cursor = (
+                                eff_alpha * cursor
+                                + (1.0 - eff_alpha) * self.smoothed_cursor
+                            )
+                            self.smoothed_baseline = (
+                                eff_alpha * baseline
+                                + (1.0 - eff_alpha) * self.smoothed_baseline
+                            )
 
                         # Ghost cursor (hide when locked)
                         if self.ghost_site_id >= 0:
@@ -784,11 +1015,12 @@ class HandSimController:
                         target_ctrl = self.smoothed_baseline + deviation
                         target_ctrl = np.clip(target_ctrl, self.act_low, self.act_high)
 
-                        # Rate limiter
-                        ctrl_delta = target_ctrl - self._prev_ctrl
-                        ctrl_delta = np.clip(ctrl_delta, -MAX_CTRL_STEP, MAX_CTRL_STEP)
-                        self.current_ctrl = self._prev_ctrl + ctrl_delta
-                        self._prev_ctrl = self.current_ctrl.copy()
+                        # Slew limiter: dt-aware tendon rate cap (units/second;
+                        # equals the old 0.03/frame cap at the 60 fps target).
+                        self.current_ctrl = np.asarray(
+                            self._ctrl_slew.step(target_ctrl, dt),
+                            dtype=np.float32,
+                        )
 
                         grip_st = "CARRYING 🔒" if self.grasp_locked else "FREE"
                         status_msg = f"Wx:{features['wrist_x']:.2f}  Wy:{features['wrist_y']:.2f}  [{grip_st}]"
@@ -796,7 +1028,7 @@ class HandSimController:
                     status_msg = "No hand detected — holding state"
 
                 # ── Physics step ───────────────────────────────────────────────
-                self.mj_data.ctrl[:] = self.current_ctrl
+                self._write_ctrl()
 
                 # Pre-compute anti-gravity force for grasped object once.
                 # xfrc_applied[bid] = [fx, fy, fz, tx, ty, tz] in world frame.
@@ -848,10 +1080,23 @@ class HandSimController:
                     self.grasp_locked,
                     tip_pos,
                     self.current_ctrl,
-                    self.mode,
+                    f"{self.mode} [{self._filter_desc}]",
                     status_msg,
-                    self._fist_counter,
+                    int(round(self._pinch_hold.progress * FIST_LOCK_FRAMES)),
                 )
+
+                # Voice co-pilot status line (below the HUD block)
+                if self._voice_queue is not None and self._voice_status:
+                    cv2.putText(
+                        frame,
+                        self._voice_status,
+                        (10, 142),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45,
+                        (80, 220, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
 
                 # Movement arrow from wrist
                 # GREEN = free tracking  |  ORANGE = carrying (still steerable)
@@ -928,30 +1173,33 @@ class HandSimController:
                     self._unlock_grasp()
                     status_msg = "SPACE → RELEASED 🔓"
                 elif key == ord("c"):
-                    # Calibrate neutral hand pose and depth baseline.
+                    # Calibrate neutral hand position and depth baseline.
                     if features is not None:
                         self._bbox_center = features["bbox_area"]
                         self._neutral_xy = np.array(
-                            [features["target_yaw"], features["target_pitch"]],
+                            [features["wrist_x"], features["wrist_y"]],
                             dtype=np.float32,
                         )
+                        self._neutral_roll = float(features["roll_angle"])
                     self.smoothed_cursor = np.zeros(2, dtype=np.float32)
                     self.smoothed_baseline = NEUTRAL_LEN
+                    self._reset_motion_filters()
                     status_msg = "Neutral hand pose calibrated"
                 elif key == ord("r"):
                     mujoco.mj_resetData(self.mj_model, self.mj_data)
                     self.current_ctrl = np.full(3, NEUTRAL_LEN, dtype=np.float32)
                     self._last_valid_ctrl = self.current_ctrl.copy()
-                    self._prev_ctrl = self.current_ctrl.copy()
-                    self.mj_data.ctrl[:] = self.current_ctrl
+                    self._smoothed_yaw = 0.0
+                    self._write_ctrl()
                     self.grasp_locked = False
                     self.grasped_bid = -1
-                    self._fist_counter = 0
-                    self._flat_counter = 0
+                    self._pinch_hold.reset()
+                    self._flat_hold.reset()
                     self._pinch_was_open = True
                     self._grasp_offset = np.zeros(3, dtype=np.float32)
                     self.smoothed_cursor = np.zeros(2, dtype=np.float32)
                     self.smoothed_baseline = NEUTRAL_LEN
+                    self._reset_motion_filters()
                     mujoco.mj_forward(self.mj_model, self.mj_data)
                     status_msg = "↺ RESET"
 
@@ -1013,7 +1261,12 @@ def run_hand_controller(
     model_path: Optional[str] = None,
     camera_id: int = 0,
     mode: str = "direct",
-    smoothing: float = 0.90,  # high alpha = direct/physical feel
+    smoothing: float = 0.90,  # ema mode only: high alpha = direct/physical feel
+    filter_mode: str = "one-euro",
+    min_cutoff: float = CURSOR_MIN_CUTOFF,
+    beta: float = CURSOR_BETA,
+    max_ctrl_rate: float = MAX_CTRL_RATE,
+    voice: Optional[str] = None,
 ):
     """Launch the threaded hand controller."""
     HandSimController(
@@ -1022,4 +1275,9 @@ def run_hand_controller(
         camera_id=camera_id,
         mode=mode,
         smoothing_alpha=smoothing,
+        filter_mode=filter_mode,
+        min_cutoff=min_cutoff,
+        beta=beta,
+        max_ctrl_rate=max_ctrl_rate,
+        voice=voice,
     ).run()

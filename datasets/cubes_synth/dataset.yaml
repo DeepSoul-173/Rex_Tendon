@@ -1,0 +1,13 @@
+path: C:/Users/abhij/Downloads/rex-tendon/datasets/cubes_synth
+train: images/train
+val: images/val
+names:
+  0: red_cube
+  1: purple_cube
+  2: yellow_cube
+  3: blue_cylinder
+  4: green_bar
+  5: orange_cube
+  6: blue_cube
+  7: gray_cube
+  8: green_cube

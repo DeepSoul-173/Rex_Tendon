@@ -1,0 +1,132 @@
+# Stage B stacking curriculum: 2-section (4-DOF) arm rebuilds a source stack at a
+# target location, ramping stack height 2 -> 3 as it masters each level
+# (reuses the multi-object curriculum: stack_count follows the shared level).
+#
+# WARM-START THIS from the pick_place_2section foundation policy:
+#   pick-place train-multi --config .../pick_place_stack.yaml \
+#       --init-model rex_results/pick_place_2section/<run>/models/best_model/best_model.zip
+# Training stacking from scratch diverges (policy std -> 8e4): the easy proximity
+# grasp needs no precision, so ent_coef pushes variance up unchecked. A competent
+# 4-DOF base policy + lower ent_coef keeps it stable.
+#
+# REACH LIMIT: cubes are 2 cm tall; the arm reaches ~0.068 m at the source xy, so
+# a source-stack TOP above 3 cubes (z>=0.072) is UNGRASPABLE. Curriculum caps at 3.
+pick_place:
+  env:
+    xml_file: "rex_assets/rex_simulation/pick_and_place_scene_2section.xml"
+    # 4-DOF arm tendons are 0.06-0.17; start near rest (slightly slack).
+    initial_actuator_position: [0.13, 0.17]
+    simulation_length_seconds: 20.0   # multiple cubes per episode
+
+    # Stacking height curriculum 2 -> 3 (bumps when place_success > 90%).
+    # Capped at 3: a 4-high source stack's top cube is beyond the arm's reach.
+    object_curriculum_enabled: true
+    min_spawned_objects: 2
+    max_spawned_objects: 3
+
+    # Grasp trigger: hybrid (contact OR proximity). Contact-only was probed
+    # (2026-06-11): random approaches achieve force-bearing contact in 0.7% of
+    # episodes and latch in 0.3% — undiscoverable for RL; runs 2 & 3 (12M each)
+    # both collapsed to 0% grasping under grasp_requires_contact: true. Since
+    # the carry is assisted regardless, the trigger's realism was cosmetic;
+    # placement below is where physics is the judge. Grasp realism = documented
+    # limitation (future work: wrap-grasp contact physics).
+    grasp_requires_contact: false
+    grasp_distance_threshold: 0.035
+    grasp_consecutive_steps: 2
+    # Carry depth: the tip's contact sphere is 8 mm; at 0.015 the carried
+    # cube's top sat 3 mm INSIDE it, so the per-step assist snap re-created
+    # penetration and the contact impulses shook the arm — run-4 logs show
+    # carried cubes flung to 0.65-0.77 m from the slot. 0.025 keeps the cube
+    # 7 mm clear of the sphere.
+    grasp_carry_offset: 0.025
+    # PLACEMENT ACCURACY (kept): the cube is released above the slot and must
+    # physically land within tolerance + survive the topple check. Oracle probe:
+    # 12/300 random-action carries complete a real placement -> discoverable.
+    place_mode: release
+    place_settle_steps: 6             # ~0.5 s of physics before judging
+    # Run-7 tolerance matching: run 6 proved the policy carries the cube to
+    # 5-6 cm of any commanded target (verified det+stochastic rollouts), but
+    # the 3 cm trigger sat ~2 cm inside that precision — snapshot policies
+    # hovered at the line and rarely fired. 4.5 cm puts the trigger inside
+    # the demonstrated envelope (still within the scene's 6 cm zone disc);
+    # the place bonus then tightens precision from frequent successes.
+    place_distance_threshold: 0.045   # release trigger + settled-cube tolerance
+    # Holding (0.15/step) must beat hovering near the cube: cap the proximity
+    # shaping at 0.1/step (default 0.25 out-paid holding at ~1 cm — run-3 flaw).
+    grasp_proximity_bonus_scale: 0.1
+
+    # Reach/grasp phase transfers fast; enter placing early.
+    curriculum_enabled: true
+    reach_only_steps: 0
+    reach_grasp_steps: 100000
+
+    # Non-farmable reward (Stage A recipe): progress-to-slot + per-cube place
+    # bonus + completion bonus + living cost; no per-step lift reward.
+    #
+    # Carry-phase design history (don't repeat these):
+    #  - Run 1 (8M, ent 0.005): progress x3 alone -> +0.48 total for the full
+    #    0.16 m transport; policy plateaued at lift-and-hover, 0% place.
+    #  - Run 2 (12M, ent 0.0075): absolute carry penalty (-1.0 * tip_to_place
+    #    while grasped) + contact-gated grasping -> touching the cube became
+    #    net-negative for a policy that can't place yet; grasp rate fell
+    #    10% -> 0%, std then blew up 0.16 -> 544. Avoidable state + absolute
+    #    in-state penalty = state avoidance.
+    #  - Run 3 (12M, ent 0.005): hold bonus + progress x12 fixed std (stayed
+    #    0.11-0.40, no blowup) but contact-grasping still died (4% -> 0%):
+    #    (a) the proximity bonus (max 0.25/step) out-paid holding (0.15), and
+    #    (b) the oracle probe showed contact latches in only 0.3% of random
+    #    episodes — undiscoverable regardless of incentives.
+    #  - Run 4: re-grasp-after-release withdrew every place attempt (fixed:
+    #    settle suppression); carried cube penetrated the tip sphere (fixed:
+    #    carry offset 0.025).
+    #  - Run 5 (12M): REAL 90% grasping learned (verified by rollout video),
+    #    but the unbounded hold bonus became the farm: grasp -> drag to base
+    #    -> coil up at +0.15/step forever; gamma=0.99 discounting makes the
+    #    distant place bonus uncompetitive against infinite hold flow.
+    #  - Run 6 (this config): hold bonus budgeted per episode (acquisition
+    #    pays, then only transport pays), grasp bonus once per episode (no
+    #    release/re-grasp cycling), and the target is sampled per episode
+    #    around the base (near goals are discoverable within the hold budget;
+    #    place_pos is observed, so the policy is goal-conditioned).
+    reach_reward_scale: 1.0
+    grasp_bonus: 5.0
+    grasp_bonus_first_only: true
+    grasp_hold_bonus: 0.15
+    grasp_hold_bonus_budget_steps: 60
+    object_progress_reward_scale: 12.0
+    transport_reward_scale: 0.0
+    place_bonus: 20.0
+    drop_penalty: 3.0
+    time_penalty: 0.05
+    carry_reach_reward_scale: 0.0   # run-2 lesson: punishes grasping itself
+    stack_target_randomize: true
+    stack_target_radius: [0.05, 0.10]
+
+    randomize_dynamics: true
+    add_observation_noise: true
+    action_smoothing_alpha: 0.45
+    max_action_delta_per_step: 0.25
+
+  training:
+    num_envs: 12
+    total_timesteps: 12000000
+    eval_freq: 40000
+    save_freq: 200000
+    learning_rate: 0.0003
+    n_steps: 1024
+    batch_size: 256
+    # 0.0075 fed the run-2 std blowup (0.16 -> 544 once gradients flatlined).
+    # Back to 0.005: bootstrapping now relies on dense potential-based shaping,
+    # not exploration entropy.
+    ent_coef: 0.005
+    log_dir_base: "rex_results/pick_place_stack"
+
+  active_task: stack
+  tasks:
+    stack:
+      name: stack
+      stacking: true
+      stack_count: 2
+      source_xy: [0.08, 0.0]
+      target_xy: [-0.08, 0.0]

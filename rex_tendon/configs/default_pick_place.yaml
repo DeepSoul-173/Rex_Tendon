@@ -47,9 +47,11 @@ pick_place:
     include_relative_observations: true
     include_object_velocity_in_obs: true
 
-    # Object spawn bounds (on desk surface)
-    object_spawn_bounds_min: [-0.1, -0.1, -0.025]
-    object_spawn_bounds_max: [0.1, 0.1, -0.025]
+    # Object spawn bounds (on desk surface).
+    # Constrained to the tip's reachable annulus (~0.075-0.13 m radius);
+    # wider bounds spawn dice the tendon tip can never reach.
+    object_spawn_bounds_min: [-0.09, -0.09, 0.0]
+    object_spawn_bounds_max: [0.09, 0.09, 0.0]
 
     # Action space
     max_2d_action_magnitude: 1.0
@@ -110,5 +112,5 @@ pick_place:
       name: task1
       active_object_index: 0
       object_position: [0.08, -0.05, 0.0]
-      place_position: [-0.08, 0.08, -0.025]
+      place_position: [-0.08, 0.08, 0.002]
       randomize_object_position: true

@@ -23,9 +23,10 @@ def main():
         description="Direction-based hand control for the Rex Tendon robot simulation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Hand Control Scheme:
-  Wrist position (L/R)             - Move robot tip left / right
-  Wrist position (U/D)             - Move robot tip up / down
+Hand Control Scheme (decoupled channels):
+  Wrist position (L/R)             - Bend robot tip left / right
+  Wrist position (U/D)             - Bend robot tip up / down
+  Twist / roll hand                - Rotate the base (yaw) — true twist DOF
   Hand depth (closer/farther)      - Z extension: closer=extend, farther=retract
   Flat open palm                   - Return robot to neutral position
   Pinch THUMB + INDEX (hold)       - LOCK grasp on nearest object
@@ -55,7 +56,8 @@ Modes:
     parser.add_argument(
         "--model",
         default=None,
-        help="Path to trained RL model (.zip). Enables RL mode.",
+        help="Path to trained RL model (.zip). NOTE: RL-guided mode is not "
+        "implemented yet — the controller warns and runs direct control.",
     )
     parser.add_argument(
         "--camera",
@@ -70,10 +72,46 @@ Modes:
         help="Control mode. Auto-detected: 'rl' if --model given, else 'direct'.",
     )
     parser.add_argument(
+        "--filter",
+        choices=["one-euro", "ema"],
+        default="one-euro",
+        help="Cursor filter: 'one-euro' = adaptive (calm at rest, direct in "
+        "motion); 'ema' = legacy fixed-alpha baseline. Default: one-euro",
+    )
+    parser.add_argument(
+        "--min-cutoff",
+        type=float,
+        default=1.0,
+        help="one-euro only: rest smoothing in Hz. Lower = steadier hover, "
+        "more lag on slow drift. Default: 1.0",
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=0.15,
+        help="one-euro only: speed coefficient. Higher = less lag on fast "
+        "moves. Default: 0.15",
+    )
+    parser.add_argument(
+        "--max-rate",
+        type=float,
+        default=0.8,
+        help="Tendon speed cap in m/s. Lower = calmer, slower arm. "
+        "Default: 0.8",
+    )
+    parser.add_argument(
         "--smoothing",
         type=float,
         default=0.90,
-        help="Alpha for cursor smoothing: 0=max smooth, 1=instant/no-smooth. Default: 0.90",
+        help="ema only: alpha per frame, 0=max smooth, 1=instant. Default: 0.90",
+    )
+    parser.add_argument(
+        "--voice",
+        choices=["off", "typed", "speech"],
+        default="off",
+        help="Voice co-pilot: say 'grab the red cube' / 'release' / 'neutral' "
+        "while steering by hand. 'typed' reads from this terminal; 'speech' "
+        "uses the microphone (SpeechRecognition).",
     )
 
     args = parser.parse_args()
@@ -94,11 +132,15 @@ Modes:
     print(f"  Mode:      {mode.upper()}")
     print(f"  Model:     {args.model or 'None (direct control)'}")
     print(f"  Camera:    {args.camera}")
-    print(f"  Smoothing: {args.smoothing}")
+    if args.filter == "one-euro":
+        print(f"  Filter:    one-euro (min_cutoff={args.min_cutoff} Hz, beta={args.beta})")
+    else:
+        print(f"  Filter:    ema (alpha={args.smoothing})")
     print("=" * 60)
     print("  Hand Controls:")
-    print("    Wrist left/right       -> Robot L/R movement")
-    print("    Wrist up/down          -> Robot U/D movement")
+    print("    Wrist left/right       -> Bend tip L/R")
+    print("    Wrist up/down          -> Bend tip U/D")
+    print("    Twist / roll hand      -> Rotate base (yaw)")
     print("    Hand depth             -> Z extension (closer=extend)")
     print("    Flat open palm         -> Return to neutral position")
     print("    Pinch THUMB+INDEX      -> LOCK grasp (hold briefly)")
@@ -116,6 +158,11 @@ Modes:
         camera_id=args.camera,
         mode=mode,
         smoothing=args.smoothing,
+        filter_mode=args.filter,
+        min_cutoff=args.min_cutoff,
+        beta=args.beta,
+        max_ctrl_rate=args.max_rate,
+        voice=None if args.voice == "off" else args.voice,
     )
 
 

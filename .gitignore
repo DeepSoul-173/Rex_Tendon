@@ -1,23 +1,32 @@
+# Environment / OS
 .env
 .DS_Store
 __pycache__/
-rex_results/
-results/
 .venv/
 .pytest_cache/
+
+# Experiment outputs (training runs, checkpoints, logs)
+rex_results/
+results/
+eval_results/
+_train_*.log
+MUJOCO_LOG.TXT
+
+# Large data / artifacts
 **/data/**
 **/projects/**
-/media/
-MUJOCO_LOG.TXT
 projects/**
+/media/
 *.zip
 *.pkl
-
-# Testing and Scratch scripts
-scratch_*.py
-test_*.py
-tests/
-visualize_model.py
-train_pick_place.py
-implementation_plan.md
 yolov8n.pt
+
+# Local scratch (intentionally untracked)
+scratch_*.py
+train_pick_place.py
+
+# Editor
+*.code-workspace
+
+# Watcher output logs
+_watch_*.log

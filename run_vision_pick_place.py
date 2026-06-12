@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
@@ -39,7 +40,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to trained RL model (defaults to the most recent run under rex_results/pick_place)",
     )
-    parser.add_argument("--yolo_model", type=str, default="yolov8n.pt")
+    parser.add_argument(
+        "--yolo_model",
+        type=str,
+        default=None,
+        help="YOLO weights. Default: newest fine-tuned yolo_training/*/weights/"
+        "best.pt; falls back to COCO yolov8n.pt (which does NOT know the cubes).",
+    )
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--episodes", type=int, default=20)
     return parser.parse_args()
@@ -156,8 +163,27 @@ def main() -> None:
     else:
         print("Warning: no VecNormalize stats found; policy may behave poorly.")
 
+    yolo_weights = args.yolo_model
+    if yolo_weights is None:
+        trained = sorted(
+            Path("yolo_training").glob("*/weights/best.pt"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        if trained:
+            yolo_weights = str(trained[-1])
+            print(f"Using fine-tuned detector: {yolo_weights}")
+        else:
+            yolo_weights = "yolov8n.pt"
+            print(
+                "WARNING: no fine-tuned detector found — using COCO yolov8n.pt, "
+                "which does NOT know these cubes. Train one with:\n"
+                "  python -m rex_tendon.training.vision.generate_synthetic_data "
+                "--count 1200 --out datasets/cubes_synth --size 480\n"
+                "  python -m rex_tendon vision train datasets/cubes_synth/"
+                "dataset.yaml --config rex_tendon/configs/vision_synth.yaml"
+            )
     print("Loading YOLO model...")
-    yolo_detector = YOLO(args.yolo_model)
+    yolo_detector = YOLO(yolo_weights)
 
     window_name = "YOLO Vision - Pick & Place"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -174,6 +200,7 @@ def main() -> None:
 
             print(f"\n--- Starting Episode {episode + 1} ---")
             while not done:
+                step_started = time.perf_counter()
                 action, _ = rl_model.predict(obs, deterministic=True)
                 obs, done, info = step_active_env(active_env, np.asarray(action))
 
@@ -232,6 +259,14 @@ def main() -> None:
                 cv2.imshow(window_name, frame_bgr)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     return
+
+                # Real-time pacing: one env step represents time_per_step
+                # seconds of simulated time. Without this the demo plays as
+                # fast as the CPU allows (~5-10x speed).
+                elapsed = time.perf_counter() - step_started
+                remaining = float(env.time_per_step) - elapsed
+                if remaining > 0:
+                    time.sleep(remaining)
     finally:
         env.close()
         cv2.destroyAllWindows()

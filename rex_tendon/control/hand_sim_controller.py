@@ -82,8 +82,12 @@ DEAD_ROLL = 0.06  # hand-roll dead-zone (radians)
 
 # ── Motion safety ─────────────────────────────────────────────────────────────
 MAX_TENDON_DEV = 0.070  # max tendon offset from baseline (caps bend amount)
-MAX_CTRL_STEP = 0.030  # legacy per-frame cap; kept to derive the dt-aware rate
-MAX_CTRL_RATE = MAX_CTRL_STEP * 60.0  # tendon slew cap in m/s (= old cap at 60 fps)
+# Tendon slew cap in m/s. Tuned by feel, NOT derived from the old per-frame
+# cap: the webcam+MediaPipe loop runs at ~15-25 fps on a laptop (not the 60 fps
+# design target), and a "60 fps equivalent" rate of 1.8 m/s allowed 3x faster
+# tendon motion per real frame than the old controller — felt jerky and threw
+# objects. 0.8 m/s is calm at any frame rate; raise via --max-rate if sluggish.
+MAX_CTRL_RATE = 0.8
 STALE_CAM_TIMEOUT = 0.5  # s without a fresh camera sample → hold position
 
 # ── Cursor filtering (one-euro mode) ──────────────────────────────────────────
@@ -91,8 +95,8 @@ STALE_CAM_TIMEOUT = 0.5  # s without a fresh camera sample → hold position
 # fast. min_cutoff (Hz): lower = steadier at rest, laggier on slow drift.
 # beta: higher = less lag during fast motion. "ema" mode keeps the legacy
 # fixed-alpha filter as the A/B baseline.
-CURSOR_MIN_CUTOFF = 1.5
-CURSOR_BETA = 0.4
+CURSOR_MIN_CUTOFF = 1.0
+CURSOR_BETA = 0.15
 YAW_MIN_CUTOFF = 1.0  # yaw is deliberately slower than the bend cursor
 YAW_BETA = 0.2
 
@@ -488,6 +492,7 @@ class HandSimController:
         filter_mode: str = "one-euro",
         min_cutoff: float = CURSOR_MIN_CUTOFF,
         beta: float = CURSOR_BETA,
+        max_ctrl_rate: float = MAX_CTRL_RATE,
         voice: Optional[str] = None,  # None | "typed" | "speech"
     ):
         if filter_mode not in ("one-euro", "ema"):
@@ -537,7 +542,7 @@ class HandSimController:
         self._cursor_filter = OneEuroFilter(min_cutoff=min_cutoff, beta=beta)
         self._baseline_filter = OneEuroFilter(min_cutoff=min_cutoff, beta=beta)
         self._yaw_filter = OneEuroFilter(min_cutoff=YAW_MIN_CUTOFF, beta=YAW_BETA)
-        self._ctrl_slew = SlewRateLimiter(MAX_CTRL_RATE)
+        self._ctrl_slew = SlewRateLimiter(max_ctrl_rate)
         self._ctrl_slew.reset(self.current_ctrl)
 
         self.grasp_locked = False
@@ -594,8 +599,13 @@ class HandSimController:
         self._voice_status = ""
         if voice in ("typed", "speech"):
             self._voice_queue = queue.Queue()
-            start_input_thread(self._voice_queue, mode=voice)
-            self._voice_status = "voice co-pilot ready — say 'grab the red cube'"
+            self._voice_status = "voice co-pilot starting..."
+            # Mic ON/OFF status lands on the HUD via _voice_status.
+            start_input_thread(
+                self._voice_queue,
+                mode=voice,
+                status_cb=lambda msg: setattr(self, "_voice_status", msg),
+            )
 
         self.camera_id = camera_id
         mujoco.mj_forward(self.mj_model, self.mj_data)
@@ -642,7 +652,6 @@ class HandSimController:
 
         if dist <= AUTO_WRAP_DIST and bid >= 0:
             self.grasped_bid = bid
-            obj_pos = self.mj_data.xpos[bid].copy()
 
             # Snap object neatly beneath the tip to avoid collision explosion.
             # A fixed offset ensures it doesn't float far away if grabbed from a distance.
@@ -659,20 +668,10 @@ class HandSimController:
                 if qvel_adr >= 0:
                     self.mj_data.qvel[qvel_adr : qvel_adr + 6] = 0.0
 
-            # NOTE: we do NOT change smoothed_cursor or smoothed_baseline here.
-            # The hand tracking continues driving the robot immediately after lock,
-            # so the user can steer while carrying.  Only current_ctrl is pre-bent.
-            dx = obj_pos[0] - tip_pos[0]
-            dy = obj_pos[1] - tip_pos[1]
-            dist_xy = np.sqrt(dx**2 + dy**2)
-            if dist_xy > 1e-4:
-                wrap_dir = np.array([dx / dist_xy, dy / dist_xy], dtype=np.float32)
-                bl_arr = np.full(3, self.smoothed_baseline, dtype=np.float32)
-                self.current_ctrl = convert_2d_cursor_to_target_lengths(
-                    wrap_dir, bl_arr, self.act_low, self.act_high, 1.0
-                )
-                self._last_valid_ctrl = self.current_ctrl.copy()
-                # smoothed_cursor intentionally NOT updated — hand resumes control
+            # No pre-bend: the old "wrap pose" overwrote current_ctrl in a
+            # single frame, bypassing the slew limiter — a violent jerk on
+            # every grasp. The hand keeps continuous control; the snap-carry
+            # alone provides the hold.
 
             logger.info(f"Grasp LOCKED + auto-wrap → dist={dist:.3f} m")
         else:
@@ -1266,6 +1265,7 @@ def run_hand_controller(
     filter_mode: str = "one-euro",
     min_cutoff: float = CURSOR_MIN_CUTOFF,
     beta: float = CURSOR_BETA,
+    max_ctrl_rate: float = MAX_CTRL_RATE,
     voice: Optional[str] = None,
 ):
     """Launch the threaded hand controller."""
@@ -1278,5 +1278,6 @@ def run_hand_controller(
         filter_mode=filter_mode,
         min_cutoff=min_cutoff,
         beta=beta,
+        max_ctrl_rate=max_ctrl_rate,
         voice=voice,
     ).run()

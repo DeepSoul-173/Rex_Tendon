@@ -30,7 +30,7 @@ sys.path.insert(0, ".")
 
 from rex_tendon.control.sim_primitives import SimArm, SimIntentExecutor
 from rex_tendon.control.voice_commands import handle_text_sequence
-from rex_tendon.control.voice_io import start_input_thread
+from rex_tendon.control.voice_io import list_microphones, start_input_thread
 
 
 def main() -> None:
@@ -47,6 +47,17 @@ def main() -> None:
         help="Command input: typed stdin or microphone via SpeechRecognition",
     )
     parser.add_argument(
+        "--mic-index",
+        type=int,
+        default=None,
+        help="Input device index for --asr speech (see --list-mics)",
+    )
+    parser.add_argument(
+        "--list-mics",
+        action="store_true",
+        help="List available microphones and exit",
+    )
+    parser.add_argument(
         "--no-viewer", action="store_true", help="Headless (for testing)"
     )
     parser.add_argument(
@@ -56,6 +67,14 @@ def main() -> None:
         "everything into the reachable workspace",
     )
     args = parser.parse_args()
+
+    if args.list_mics:
+        mics = list_microphones()
+        if not mics:
+            print("No microphones found (is PyAudio installed?).")
+        for idx, name in mics:
+            print(f"  {idx}: {name}")
+        return
 
     arm = SimArm(
         args.xml,
@@ -77,7 +96,9 @@ def main() -> None:
     print("=" * 60)
 
     commands: queue.Queue = queue.Queue()
-    start_input_thread(commands, mode=args.asr)
+    if args.asr == "typed":
+        print("  MIC: OFF — typed mode (use --asr speech for the microphone)")
+    start_input_thread(commands, mode=args.asr, mic_index=args.mic_index)
 
     try:
         while True:

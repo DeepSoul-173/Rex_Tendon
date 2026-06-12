@@ -81,16 +81,23 @@ Modes:
     parser.add_argument(
         "--min-cutoff",
         type=float,
-        default=1.5,
+        default=1.0,
         help="one-euro only: rest smoothing in Hz. Lower = steadier hover, "
-        "more lag on slow drift. Default: 1.5",
+        "more lag on slow drift. Default: 1.0",
     )
     parser.add_argument(
         "--beta",
         type=float,
-        default=0.4,
+        default=0.15,
         help="one-euro only: speed coefficient. Higher = less lag on fast "
-        "moves. Default: 0.4",
+        "moves. Default: 0.15",
+    )
+    parser.add_argument(
+        "--max-rate",
+        type=float,
+        default=0.8,
+        help="Tendon speed cap in m/s. Lower = calmer, slower arm. "
+        "Default: 0.8",
     )
     parser.add_argument(
         "--smoothing",
@@ -154,6 +161,7 @@ Modes:
         filter_mode=args.filter,
         min_cutoff=args.min_cutoff,
         beta=args.beta,
+        max_ctrl_rate=args.max_rate,
         voice=None if args.voice == "off" else args.voice,
     )
 

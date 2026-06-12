@@ -216,14 +216,20 @@ class SimArm:
         mujoco.mj_forward(self.model, self.data)
 
     def _arrange_objects(self, seed: int = 0) -> None:
-        """Respawn every object at a random collision-free reachable spot."""
+        """Respawn every object at a random collision-free reachable spot.
+
+        The spawn ring must clear the robot_base pedestal: a 5 cm collision
+        cylinder at the origin. Spawning closer than pedestal + half-object
+        starts objects in penetration and the solver fires them outward
+        ('objects throwing the robot').
+        """
         rng = np.random.default_rng(seed)
         placed: list[np.ndarray] = []
         for obj in self.objects:
             xy = None
             for _ in range(80):
                 az = rng.uniform(-np.pi, np.pi)
-                r = rng.uniform(0.045, 0.066)
+                r = rng.uniform(0.063, 0.068)  # pedestal 0.05 + obj + margin
                 candidate = np.array([r * np.cos(az), r * np.sin(az)])
                 if all(np.linalg.norm(candidate - p) >= 0.05 for p in placed):
                     xy = candidate
@@ -455,7 +461,8 @@ class SimArm:
             p = self.place_zone_position()
             return np.array([p[0], p[1], 0.002])
         if name in ("center", "middle"):
-            return np.array([0.0, -0.06, 0.002])
+            # Clear of the 5 cm base pedestal, inside the settled reach.
+            return np.array([0.0, -0.065, 0.002])
         if name == "corner":
             # Toward the table's near corner, at the edge of settled reach.
             d = R_REACH / np.sqrt(2.0)

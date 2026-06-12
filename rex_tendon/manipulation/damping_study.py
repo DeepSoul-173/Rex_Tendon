@@ -24,9 +24,14 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from ..control.geometry import convert_2d_cursor_to_target_lengths
+from ..control.geometry import (
+    convert_2d_cursor_to_target_lengths,
+    convert_4d_cursor_to_target_lengths,
+)
 
 SCENE = "rex_assets/rex_simulation/pick_and_place_scene.xml"
+SCENE_2SECTION = "rex_assets/rex_simulation/pick_and_place_scene_2section.xml"
+BASELINES_2SECTION = np.array([0.13] * 3 + [0.17] * 3, dtype=np.float32)
 SETTLE_BAND = 0.002  # m: tip considered settled within this of its final pose
 TRIAL_SECONDS = 8.0
 FINAL_WINDOW = 0.5  # s averaged to define the final pose
@@ -68,20 +73,36 @@ def measure_step_response(
     act_low = model.actuator_ctrlrange[:3, 0]
     act_high = model.actuator_ctrlrange[:3, 1]
 
+    two_section = model.nu >= 6
+
     # Let the arm settle at neutral first.
-    data.ctrl[:3] = 0.23
+    if two_section:
+        data.ctrl[:6] = BASELINES_2SECTION
+    else:
+        data.ctrl[:3] = 0.23
     for _ in range(1500):
         mujoco.mj_step(model, data)
     tip0 = data.site_xpos[tip_id].copy()
 
     # Step input: a hard bend command (maximum excitation of the ringing).
-    data.ctrl[:3] = convert_2d_cursor_to_target_lengths(
-        np.array([0.8, 0.0], dtype=np.float32),
-        np.full(3, 0.23, dtype=np.float32),
-        act_low,
-        act_high,
-        1.0,
-    )
+    if two_section:
+        lo6 = model.actuator_ctrlrange[:6, 0]
+        hi6 = model.actuator_ctrlrange[:6, 1]
+        data.ctrl[:6] = convert_4d_cursor_to_target_lengths(
+            np.array([0.8, 0.0, 0.8, 0.0], dtype=np.float32),
+            BASELINES_2SECTION,
+            lo6,
+            hi6,
+            1.0,
+        )
+    else:
+        data.ctrl[:3] = convert_2d_cursor_to_target_lengths(
+            np.array([0.8, 0.0], dtype=np.float32),
+            np.full(3, 0.23, dtype=np.float32),
+            act_low,
+            act_high,
+            1.0,
+        )
 
     dt = float(model.opt.timestep)
     n = int(TRIAL_SECONDS / dt)
@@ -115,6 +136,50 @@ def measure_step_response(
         "trace_t": t[:: 10].tolist(),
         "trace_d": dist_to_final[:: 10].tolist(),
     }
+
+
+def probe_min_settled_z(
+    xml_path: str,
+    damping_scale: float = 1.0,
+    stiffness_scale: float = 1.0,
+    ticks: int = 900,
+) -> dict:
+    """Lowest settled tip height over a grid of descend-style poses.
+
+    THE feasibility metric for contact grasping: cube-top contact needs the
+    tip centre at z <= 0.030 (cube top 0.022 + tip sphere 0.008). Stiffening
+    that buys settle time but prices the arm out of the low workspace is a
+    failed trade (measured on the 1-section arm: x8 stiffness -> min z 0.072).
+    """
+    model = mujoco.MjModel.from_xml_path(xml_path)
+    data = mujoco.MjData(model)
+    joints, dofs = _spine_indices(model)
+    model.dof_damping[dofs] = model.dof_damping[dofs] * damping_scale
+    model.jnt_stiffness[joints] = model.jnt_stiffness[joints] * stiffness_scale
+    tip_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "tip_center")
+    lo6 = model.actuator_ctrlrange[:6, 0]
+    hi6 = model.actuator_ctrlrange[:6, 1]
+
+    best = {"z": float("inf")}
+    for m1 in (0.5, 0.9):
+        for m2 in (0.5, 0.9, 1.2):
+            for b1, b2 in ((0.08, 0.08), (0.10, 0.10), (0.13, 0.17), (0.13, 0.10)):
+                mujoco.mj_resetData(model, data)
+                baselines = np.array([b1] * 3 + [b2] * 3, dtype=np.float32)
+                data.ctrl[:6] = convert_4d_cursor_to_target_lengths(
+                    np.array([m1, 0.0, m2, 0.0], dtype=np.float32),
+                    baselines, lo6, hi6, 1.0,
+                )
+                for _ in range(ticks):
+                    mujoco.mj_step(model, data)
+                tip = data.site_xpos[tip_id]
+                r = float(np.linalg.norm(tip[:2]))
+                if tip[2] < best["z"] and r > 0.03:  # over the table, not base
+                    best = {
+                        "z": float(tip[2]), "r": r,
+                        "pose": (m1, m2, b1, b2),
+                    }
+    return best
 
 
 def run_sweep(scales: list[float], out_dir: Path) -> list[dict]:

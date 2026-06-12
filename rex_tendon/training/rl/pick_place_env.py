@@ -151,6 +151,12 @@ class TentaclePickPlaceEnv(gym.Env):
         self.object_progress_reward_scale = self.config.object_progress_reward_scale
         self.carry_reach_reward_scale = self.config.carry_reach_reward_scale
         self.grasp_hold_bonus = self.config.grasp_hold_bonus
+        self.grasp_hold_bonus_budget_steps = int(
+            self.config.grasp_hold_bonus_budget_steps
+        )
+        self.grasp_bonus_first_only = bool(self.config.grasp_bonus_first_only)
+        self.stack_target_randomize = bool(self.config.stack_target_randomize)
+        self.stack_target_radius = tuple(self.config.stack_target_radius)
         self.grasp_requires_contact = self.config.grasp_requires_contact
         self.place_mode = self.config.place_mode
         self.place_settle_steps = int(self.config.place_settle_steps)
@@ -762,6 +768,8 @@ class TentaclePickPlaceEnv(gym.Env):
         self._episode_collision = False
         self._episode_occluded = False
         self._episode_ever_grasped = False
+        self._episode_hold_steps = 0
+        self._episode_grasp_bonus_paid = False
         self._place_pending_idx = -1
         self._place_settle_countdown = 0
 
@@ -788,6 +796,27 @@ class TentaclePickPlaceEnv(gym.Env):
             self._stack_toppled = False
             self._stack_source_xy = np.array(task.source_xy, dtype=np.float32)
             self._stack_target_xy = np.array(task.target_xy, dtype=np.float32)
+            if self.stack_target_randomize:
+                # Goal-conditioned targets: sample a reachable spot per episode
+                # (polar around the base), keeping clear of the source stack.
+                # Near goals make transport discoverable; place_pos in the
+                # observation carries the skill to far ones.
+                for _ in range(20):
+                    r = float(
+                        self.np_random.uniform(
+                            self.stack_target_radius[0], self.stack_target_radius[1]
+                        )
+                    )
+                    theta = float(self.np_random.uniform(-np.pi, np.pi))
+                    candidate = np.array(
+                        [r * np.cos(theta), r * np.sin(theta)], dtype=np.float32
+                    )
+                    if (
+                        float(np.linalg.norm(candidate - self._stack_source_xy))
+                        >= 0.04
+                    ):
+                        self._stack_target_xy = candidate
+                        break
             self._spawn_source_stack()
             self.active_object_idx = self._stacking_active_idx()
             self._set_place_zone_position(self._stacking_slot_position(0))
@@ -1154,7 +1183,10 @@ class TentaclePickPlaceEnv(gym.Env):
             )
 
         if self.is_grasped and not was_grasped:
-            reward += self.grasp_bonus
+            # first_only blocks release/re-grasp bonus cycling (run-6 fix).
+            if not (self.grasp_bonus_first_only and self._episode_grasp_bonus_paid):
+                reward += self.grasp_bonus
+                self._episode_grasp_bonus_paid = True
 
         if self.is_grasped or has_tip_object_contact:
             # Potential-based (signed) progress: moving toward the zone is
@@ -1163,13 +1195,18 @@ class TentaclePickPlaceEnv(gym.Env):
             reward += self.transport_reward_scale * lift_height
 
         if self.is_grasped:
-            # Holding must be worth more than hovering near the cube: with
-            # contact-gated grasping, an absolute carry penalty alone makes
-            # touching the cube a net-negative event and the policy learns to
-            # avoid contact entirely (grasp rate 10% -> 0% on the 2026-06-10
-            # retrain). Transport direction comes from the potential-based
-            # object_progress term, which cannot be farmed by holding still.
-            reward += self.grasp_hold_bonus
+            # Holding must be worth more than hovering near the cube (run-2
+            # lesson: an absolute carry penalty teaches contact avoidance) —
+            # but unbounded hold flow is itself a farm (run-5 lesson: the
+            # policy coiled up at the base collecting +0.15/step forever).
+            # The per-episode budget keeps acquisition attractive while making
+            # transport the only lasting source of value when holding.
+            self._episode_hold_steps += 1
+            if (
+                self.grasp_hold_bonus_budget_steps <= 0
+                or self._episode_hold_steps <= self.grasp_hold_bonus_budget_steps
+            ):
+                reward += self.grasp_hold_bonus
             reward -= self.carry_reach_reward_scale * tip_to_place
 
         if was_dropped:
@@ -1224,6 +1261,7 @@ class TentaclePickPlaceEnv(gym.Env):
         info["object_lifted"] = is_lifted
         info["is_grasped"] = self.is_grasped
         info["episode_ever_grasped"] = self._episode_ever_grasped
+        info["episode_hold_steps"] = self._episode_hold_steps
         info["was_dropped"] = was_dropped
         info["place_success"] = self.place_success
         # Stacking task metrics

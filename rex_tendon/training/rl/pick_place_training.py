@@ -50,6 +50,11 @@ class PickPlaceMetricsCallback(BaseCallback):
         self.action_changes = deque(maxlen=2000)
         self.action_jerks = deque(maxlen=2000)
         self.object_distances = deque(maxlen=2000)
+        # Release-place observability (run-5 gap: place stayed 0 and the logs
+        # could not say whether attempts never happened or always failed).
+        self.place_attempt_steps = 0
+        self.place_failed_steps = 0
+        self.cubes_placed_steps = 0
 
     def _on_step(self) -> bool:
         for info in self.locals.get("infos", []):
@@ -59,6 +64,13 @@ class PickPlaceMetricsCallback(BaseCallback):
                 self.action_jerks.append(info["action_jerk"])
             if "object_to_place_distance" in info:
                 self.object_distances.append(info["object_to_place_distance"])
+            if info.get("place_failed_this_step", False):
+                self.place_failed_steps += 1
+            if info.get("cubes_placed_this_step", False):
+                self.cubes_placed_steps += 1
+                self.place_attempt_steps += 1
+            elif info.get("place_failed_this_step", False):
+                self.place_attempt_steps += 1
 
             # Record one outcome per completed episode (Monitor adds "episode").
             if "episode" in info:
@@ -87,6 +99,15 @@ class PickPlaceMetricsCallback(BaseCallback):
             )
             self.logger.record("pick_place/total_episodes", self.episode_count)
             self.logger.record("pick_place/window_episodes", len(self.ep_placed))
+            self.logger.record(
+                "pick_place/place_attempts_total", self.place_attempt_steps
+            )
+            self.logger.record(
+                "pick_place/cubes_placed_total", self.cubes_placed_steps
+            )
+            self.logger.record(
+                "pick_place/place_failures_total", self.place_failed_steps
+            )
             if self.action_changes:
                 self.logger.record(
                     "pick_place/mean_action_change", float(np.mean(self.action_changes))

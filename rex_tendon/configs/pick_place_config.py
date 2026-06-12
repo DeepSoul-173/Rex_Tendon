@@ -154,6 +154,30 @@ class PickPlaceEnvConfig(BaseConfig):
         "10% -> 0%). Keep it below place_bonus / episode_steps so finishing "
         "still dominates holding forever.",
     )
+    grasp_hold_bonus_budget_steps: int = Field(
+        default=0,
+        description="Per-EPISODE cap on hold-bonus steps (0 = unlimited/legacy). "
+        "Without a budget the hold flow is farmable: run 5 (12M steps) converged "
+        "to grasp -> drag to base -> coil up and collect +0.15/step forever "
+        "(discounting makes the distant place bonus uncompetitive).",
+    )
+    grasp_bonus_first_only: bool = Field(
+        default=False,
+        description="Pay grasp_bonus only for the episode's first grasp; "
+        "blocks release/re-grasp bonus cycling.",
+    )
+    stack_target_randomize: bool = Field(
+        default=False,
+        description="Stacking: sample the target location per episode instead of "
+        "the fixed task target_xy. Near targets make the carry discoverable; the "
+        "policy is goal-conditioned (place_pos is observed), so skill at near "
+        "goals transfers to far ones.",
+    )
+    stack_target_radius: Tuple[float, float] = Field(
+        default=(0.05, 0.10),
+        description="stack_target_randomize: target distance range from the arm "
+        "base (polar sampling, any azimuth, rejected within 4 cm of the source).",
+    )
     # Grasp/place accuracy (trust of reported success)
     grasp_requires_contact: bool = Field(
         default=False,

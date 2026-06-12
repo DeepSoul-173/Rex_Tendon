@@ -161,18 +161,97 @@ def test_stack_config_loads_with_fix():
     from rex_tendon.training.rl.pick_place_training import load_pick_place_config
 
     cfg = load_pick_place_config("rex_tendon/configs/pick_place_stack.yaml")
-    # Run-4 design: hybrid grasp trigger (contact-only is undiscoverable —
-    # 0.3% latch rate in the oracle probe), holding (0.15) beats hovering
-    # (proximity capped at 0.1), transport potential-based, physical
-    # release-and-settle placement kept.
+    # Run-6 design: budgeted hold bonus + once-per-episode grasp bonus
+    # (anti-farming) + per-episode randomized reachable targets
+    # (goal-conditioned discoverability).
     assert cfg.env.carry_reach_reward_scale == 0.0
     assert cfg.env.grasp_hold_bonus == 0.15
+    assert cfg.env.grasp_hold_bonus_budget_steps == 60
+    assert cfg.env.grasp_bonus_first_only is True
+    assert cfg.env.stack_target_randomize is True
     assert cfg.env.grasp_proximity_bonus_scale == 0.1
     assert cfg.env.object_progress_reward_scale == 12.0
     assert cfg.training.ent_coef == 0.005
     assert cfg.env.grasp_requires_contact is False
     assert cfg.env.place_mode == "release"
     assert cfg.env.place_distance_threshold == 0.03
+
+
+def test_hold_bonus_budget_expires():
+    # With budget=3, the hold bonus must pay for exactly 3 held steps: the
+    # reward difference between bonus 0.15 and 0 vanishes from step 4 on.
+    rewards = {0.0: [], 0.15: []}
+    for bonus in rewards:
+        env = _stacking_env(
+            grasp_hold_bonus=bonus, grasp_hold_bonus_budget_steps=3
+        )
+        try:
+            env.reset(seed=7)
+            env._activate_grasp(env.active_object_idx)
+            action = np.zeros(env.action_space.shape, dtype=np.float32)
+            for _ in range(5):
+                _, r, _, _, info = env.step(action)
+                assert info["is_grasped"]
+                rewards[bonus].append(r)
+        finally:
+            env.close()
+    diffs = [b - a for a, b in zip(rewards[0.0], rewards[0.15])]
+    assert diffs[0] == pytest.approx(0.15, abs=1e-9)
+    assert diffs[2] == pytest.approx(0.15, abs=1e-9)
+    assert diffs[3] == pytest.approx(0.0, abs=1e-9)  # budget exhausted
+    assert diffs[4] == pytest.approx(0.0, abs=1e-9)
+
+
+def _episode_rewards(first_only: bool) -> list[float]:
+    """Latch via the env's own trigger, force a release at step 15 (the
+    trigger re-latches within that same step — grasp_proximity_count is not
+    reset on release), and return the per-step rewards."""
+    env = _stacking_env(grasp_bonus_first_only=first_only)
+    try:
+        env.reset(seed=11)
+        env.model.opt.gravity[:] = 0.0
+        action = np.zeros(env.action_space.shape, dtype=np.float32)
+        rewards = []
+        for k in range(20):
+            if not env.is_grasped:
+                _float_cube_below_tip(env)  # in proximity, trigger latches
+            if k == 15:
+                env._deactivate_grasp(env.active_object_idx)
+            _, r, _, _, info = env.step(action)
+            rewards.append(float(r))
+        assert info["is_grasped"]  # re-latched and held to the end
+        return rewards
+    finally:
+        env.close()
+
+
+def test_grasp_bonus_paid_once_per_episode():
+    legacy = _episode_rewards(first_only=False)
+    gated = _episode_rewards(first_only=True)
+    # Identical physics: only the bonus gating differs.
+    # First latch (step 2) pays in both designs...
+    assert legacy[2] == pytest.approx(gated[2], abs=1e-9)
+    assert legacy[2] > 4.0  # the +5 grasp bonus is in there
+    # ...the re-latch (step 15) pays only in legacy.
+    assert legacy[15] - gated[15] == pytest.approx(5.0, abs=1e-9)
+
+
+def test_randomized_stack_target_is_reachable_and_clear_of_source():
+    env = _stacking_env(stack_target_randomize=True)
+    try:
+        targets = []
+        for seed in range(6):
+            env.reset(seed=seed)
+            t = env._stack_target_xy.copy()
+            targets.append(t.copy())
+            r = float(np.linalg.norm(t))
+            assert 0.05 - 1e-6 <= r <= 0.10 + 1e-6
+            assert float(np.linalg.norm(t - env._stack_source_xy)) >= 0.04
+        # Targets actually vary across episodes.
+        spread = np.std(np.array(targets), axis=0).sum()
+        assert spread > 0.01
+    finally:
+        env.close()
 
 
 def _float_cube_below_tip(env, gap: float = 0.025):

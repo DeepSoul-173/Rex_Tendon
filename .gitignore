@@ -27,3 +27,6 @@ train_pick_place.py
 
 # Editor
 *.code-workspace
+
+# Watcher output logs
+_watch_*.log

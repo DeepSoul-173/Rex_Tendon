@@ -71,18 +71,31 @@ pick_place:
     #    (a) the proximity bonus (max 0.25/step) out-paid holding (0.15), and
     #    (b) the oracle probe showed contact latches in only 0.3% of random
     #    episodes — undiscoverable regardless of incentives.
-    #  - Run 4 (this config): hybrid grasp trigger restored (see below),
-    #    proximity bonus capped at 0.1 < hold 0.15, physical release-place
-    #    kept (probe: 12/300 random carries place successfully -> learnable).
+    #  - Run 4: re-grasp-after-release withdrew every place attempt (fixed:
+    #    settle suppression); carried cube penetrated the tip sphere (fixed:
+    #    carry offset 0.025).
+    #  - Run 5 (12M): REAL 90% grasping learned (verified by rollout video),
+    #    but the unbounded hold bonus became the farm: grasp -> drag to base
+    #    -> coil up at +0.15/step forever; gamma=0.99 discounting makes the
+    #    distant place bonus uncompetitive against infinite hold flow.
+    #  - Run 6 (this config): hold bonus budgeted per episode (acquisition
+    #    pays, then only transport pays), grasp bonus once per episode (no
+    #    release/re-grasp cycling), and the target is sampled per episode
+    #    around the base (near goals are discoverable within the hold budget;
+    #    place_pos is observed, so the policy is goal-conditioned).
     reach_reward_scale: 1.0
     grasp_bonus: 5.0
+    grasp_bonus_first_only: true
     grasp_hold_bonus: 0.15
+    grasp_hold_bonus_budget_steps: 60
     object_progress_reward_scale: 12.0
     transport_reward_scale: 0.0
     place_bonus: 20.0
     drop_penalty: 3.0
     time_penalty: 0.05
     carry_reach_reward_scale: 0.0   # run-2 lesson: punishes grasping itself
+    stack_target_randomize: true
+    stack_target_radius: [0.05, 0.10]
 
     randomize_dynamics: true
     add_observation_noise: true

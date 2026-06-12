@@ -63,8 +63,15 @@ def main() -> None:
     parser.add_argument(
         "--keep-layout",
         action="store_true",
-        help="Keep the scene's default object layout instead of arranging "
-        "everything into the reachable workspace",
+        help="Keep the scene's default object layout instead of staging a "
+        "clean demo scene in the reachable workspace",
+    )
+    parser.add_argument(
+        "--objects",
+        type=int,
+        default=4,
+        help="Cubes staged in the workspace (others parked off-scene). "
+        "Fewer = cleaner demo; max separation at 4. Default: 4",
     )
     args = parser.parse_args()
 
@@ -81,6 +88,7 @@ def main() -> None:
         viewer=not args.no_viewer,
         realtime=not args.no_viewer,
         arrange_objects=not args.keep_layout,
+        arrange_max_objects=args.objects,
     )
     executor = SimIntentExecutor(arm)
     colors = arm.scene_colors()

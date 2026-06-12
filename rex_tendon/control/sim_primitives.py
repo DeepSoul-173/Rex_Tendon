@@ -68,10 +68,22 @@ BASELINE_MIN, BASELINE_MAX = 0.16, 0.30
 R2B_SLOPE = 0.18  # m of radius per m of baseline (measured at full bend)
 BASELINE_STEP_MAX = 0.04  # baseline change cap per aim iteration
 R_REACH = 0.069  # max settled tip radius (measured; beyond it = swing-only)
-PLACE_TOL = 0.06  # the scene's place-zone disc radius — its own tolerance
-CURSOR_RATE = 2.5  # max cursor change per second (slew during glide)
-GLIDE_TICKS = 30  # ticks spent slewing toward each new cursor target
+PLACE_TOL = 0.06  # zone-disc radius: tolerance for placing at a LOCATION
+# Stacking is judged physically, not by PLACE_TOL: the top object must rest
+# on the base's footprint at stack height (see _is_stacked_on). Reporting
+# 'Stacked' for any drop within 6 cm was dishonest on a 2 cm cube.
+STACK_XY_TOL = 0.015  # top centre within this of the base centre
+STACK_Z_TOL = 0.010  # height error tolerance at the stacked position
+CURSOR_RATE = 1.2  # max cursor change per second (2.5 lurched the arm)
+GLIDE_TICKS = 50  # ticks spent slewing toward each new cursor target
 SETTLE_TICKS = 70  # ~0.85 s of settling before each measurement
+# Lift-rotate-lower: at full bend the coil's body occupies the same annulus
+# the objects live on, so a direct sweep plows everything in its path. Large
+# azimuth changes first retract to low bend (the arm lifts), rotate up there,
+# then extend back down onto the target direction.
+RETRACT_AZ_THRESHOLD = 0.6  # rad of azimuth change that triggers the lift
+RETRACT_MAG = 0.4  # cursor magnitude during the lifted rotation
+RETRACT_TICKS = 60  # glide+settle ticks for each retract phase
 WORK_Z = 0.045  # tip height the coil branch allows at grasping radii
 SETTLE_STEPS = 30  # post-release physics steps
 _CAL_MAG = 0.85  # calibration probe magnitude (coil branch)
@@ -93,10 +105,12 @@ class SimArm:
         realtime: bool = False,
         arrange_objects: bool = False,
         arrange_seed: int = 0,
+        arrange_max_objects: int = 4,
     ):
         self.model = mujoco.MjModel.from_xml_path(xml_path)
         self.data = mujoco.MjData(self.model)
         self.realtime = realtime
+        self._next_tick: Optional[float] = None  # absolute-clock pacing state
 
         self.act_low = self.model.actuator_ctrlrange[:3, 0]
         self.act_high = self.model.actuator_ctrlrange[:3, 1]
@@ -130,10 +144,10 @@ class SimArm:
         self._viewer = None
         self._calibrate_polar()
         # The XML's default object layout spreads across the whole table; most
-        # of it is beyond the settled reach (~0.069 m). Arranging pulls every
-        # object into the workspace so voice commands can act on all of them.
+        # of it is beyond the settled reach (~0.069 m). Arranging stages a few
+        # cubes on the reachable ring and parks the rest off-scene.
         if arrange_objects:
-            self._arrange_objects(arrange_seed)
+            self._arrange_objects(arrange_seed, max_objects=arrange_max_objects)
         if viewer:
             self._viewer = mujoco.viewer.launch_passive(self.model, self.data)
 
@@ -159,15 +173,21 @@ class SimArm:
     def place_zone_position(self) -> np.ndarray:
         return self.data.site_xpos[self.place_zone_site_id].copy()
 
+    def _in_workspace(self, obj: SceneObject) -> bool:
+        pos = obj.position(self.data)
+        return pos[2] > -0.5 and float(np.linalg.norm(pos[:2])) <= 1.0
+
     def scene_colors(self) -> set[str]:
-        return available_colors(self.objects)
+        # Parked (off-scene) objects must not validate as available targets.
+        return {o.color for o in self.objects if self._in_workspace(o)}
 
     def find_object(
         self, color: Optional[str] = None, shape: Optional[str] = None
     ) -> Optional[SceneObject]:
+        candidates = [o for o in self.objects if self._in_workspace(o)]
         if color is not None:
-            return find_by_color(self.objects, color, shape)
-        obj, _ = nearest_object(self.objects, self.data, self.tip_position())
+            return find_by_color(candidates, color, shape)
+        obj, _ = nearest_object(candidates, self.data, self.tip_position())
         return obj
 
     def _write_ctrl(self) -> None:
@@ -215,33 +235,33 @@ class SimArm:
         self._write_ctrl()
         mujoco.mj_forward(self.model, self.data)
 
-    def _arrange_objects(self, seed: int = 0) -> None:
-        """Respawn every object at a random collision-free reachable spot.
+    def _arrange_objects(self, seed: int = 0, max_objects: int = 4) -> None:
+        """Stage a clean demo scene: a few cubes, maximally separated.
 
-        The spawn ring must clear the robot_base pedestal: a 5 cm collision
-        cylinder at the origin. Spawning closer than pedestal + half-object
-        starts objects in penetration and the solver fires them outward
-        ('objects throwing the robot').
+        Up to max_objects cubes are placed evenly around the reachable ring
+        (r 0.063-0.067: clear of the robot_base pedestal's 5 cm collision
+        cylinder — spawning closer starts objects in penetration and the
+        solver fires them outward). Everything else is parked far off-scene:
+        cramming all nine objects onto the thin reachable ring guaranteed the
+        coiling arm plowed through neighbours on every move.
         """
         rng = np.random.default_rng(seed)
-        placed: list[np.ndarray] = []
-        for obj in self.objects:
-            xy = None
-            for _ in range(80):
-                az = rng.uniform(-np.pi, np.pi)
-                r = rng.uniform(0.063, 0.068)  # pedestal 0.05 + obj + margin
-                candidate = np.array([r * np.cos(az), r * np.sin(az)])
-                if all(np.linalg.norm(candidate - p) >= 0.05 for p in placed):
-                    xy = candidate
-                    break
-            if xy is None:
-                continue  # workspace full — leave this object where it is
-            placed.append(xy)
+        cubes = [o for o in self.objects if o.shape == "cube"]
+        staged = cubes[: max(1, max_objects)]
+        base_az = float(rng.uniform(-np.pi, np.pi))
+        for k, obj in enumerate(self.objects):
             jnt = self.model.body_jntadr[obj.body_id]
             if jnt < 0:
                 continue
+            if obj in staged:
+                i = staged.index(obj)
+                az = base_az + 2.0 * np.pi * i / len(staged)
+                r = float(rng.uniform(0.063, 0.067))
+                pos = [r * np.cos(az), r * np.sin(az), obj.half_height + 0.001]
+            else:
+                pos = [10.0 + 0.1 * k, 10.0, float(obj.half_height)]  # parked
             adr = self.model.jnt_qposadr[jnt]
-            self.data.qpos[adr : adr + 3] = [xy[0], xy[1], obj.half_height + 0.001]
+            self.data.qpos[adr : adr + 3] = pos
             self.data.qpos[adr + 3 : adr + 7] = [1, 0, 0, 0]
             vadr = self.model.jnt_dofadr[jnt]
             if vadr >= 0:
@@ -290,7 +310,15 @@ class SimArm:
             if self._viewer is not None:
                 self._viewer.sync()
                 if self.realtime:
-                    time.sleep(self._dt)
+                    # Absolute-clock pacing: per-tick sleep(dt) ignores compute
+                    # time and plays back unevenly (visible stutter).
+                    now = time.perf_counter()
+                    if self._next_tick is None or self._next_tick < now - 0.25:
+                        self._next_tick = now  # first tick / fell far behind
+                    self._next_tick += self._dt
+                    sleep_for = self._next_tick - now
+                    if sleep_for > 0:
+                        time.sleep(sleep_for)
 
     # ── Primitives ─────────────────────────────────────────────────────────────
 
@@ -312,6 +340,27 @@ class SimArm:
         r_t = float(np.linalg.norm(target[:2]))
         az_t = float(np.arctan2(target[1], target[0]))
         az_c, mag = self._seed_cursor_for(target[:2])
+
+        # Lift-rotate-lower: a large direction change at full bend would sweep
+        # the coil's body through the object ring. Retract first (arm lifts),
+        # rotate at low bend above the objects, then extend back down.
+        tip = self.tip_position()
+        r_now = float(np.linalg.norm(tip[:2]))
+        if r_now > 0.03:
+            az_now = float(np.arctan2(tip[1], tip[0]))
+            if abs(_wrap_angle(az_t - az_now)) > RETRACT_AZ_THRESHOLD:
+                cur_mag = float(np.linalg.norm(self.cursor))
+                cur_az = (
+                    float(np.arctan2(self.cursor[1], self.cursor[0]))
+                    if cur_mag > 1e-3
+                    else az_c
+                )
+                for waypoint_az in (cur_az, az_c):
+                    self._glide_to_cursor(
+                        RETRACT_MAG
+                        * np.array([np.cos(waypoint_az), np.sin(waypoint_az)]),
+                        RETRACT_TICKS,
+                    )
 
         for _ in range(max_iters):
             tip = self.tip_position()
@@ -344,9 +393,7 @@ class SimArm:
             desired = np.clip(
                 mag * np.array([np.cos(az_c), np.sin(az_c)]), -1.0, 1.0
             )
-            for _ in range(GLIDE_TICKS):
-                self.cursor = np.asarray(self._cursor_slew.step(desired, self._dt))
-                self.step()
+            self._glide_to_cursor(desired, GLIDE_TICKS)
             self.step(SETTLE_TICKS)
 
         tip = self.tip_position()
@@ -404,10 +451,33 @@ class SimArm:
         # what the task defines as a successful placement.
         return float(np.linalg.norm(final[:2] - target[:2])) <= PLACE_TOL
 
+    def _glide_to_cursor(self, desired: np.ndarray, ticks: int) -> None:
+        """Slew the cursor toward a setpoint over `ticks` control ticks."""
+        desired = np.clip(np.asarray(desired, dtype=np.float64), -1.0, 1.0)
+        for _ in range(ticks):
+            self.cursor = np.asarray(self._cursor_slew.step(desired, self._dt))
+            self.step()
+
     def _slot_on(self, base: SceneObject, top_half: float) -> np.ndarray:
         """World point where a carried object should rest on top of `base`."""
         return base.position(self.data) + np.array(
             [0.0, 0.0, base.half_height + top_half + 0.002]
+        )
+
+    def _is_stacked_on(self, top: SceneObject, base: SceneObject) -> bool:
+        """Physical truth check: does `top` rest ON `base` right now?
+
+        Within the base's footprint in xy AND at stacked height in z. This is
+        what 'stacked' means — a drop landing 5 cm away is not a stack, even
+        though it would satisfy the looser place-at-location tolerance.
+        """
+        tp = top.position(self.data)
+        bp = base.position(self.data)
+        xy_err = float(np.linalg.norm(tp[:2] - bp[:2]))
+        z_expected = float(bp[2]) + base.half_height + top.half_height
+        return (
+            xy_err <= STACK_XY_TOL
+            and abs(float(tp[2]) - z_expected) <= STACK_Z_TOL
         )
 
     def stack(self, top_color: str, base_color: str) -> bool:
@@ -418,13 +488,17 @@ class SimArm:
         return self.stack_held_on(base_color)
 
     def stack_held_on(self, base_color: str) -> bool:
-        """Place the currently held object onto the base_color object."""
+        """Place the held object onto the base_color object — judged by the
+        physical on-top check, not the looser location tolerance."""
         if self.grasped is None:
             return False
         base = self.find_object(color=base_color)
         if base is None or base is self.grasped:
             return False
-        return self.place_at(self._slot_on(base, self.grasped.half_height))
+        top = self.grasped
+        self.place_at(self._slot_on(base, top.half_height))
+        self.step(20)  # let it fully come to rest before judging
+        return self._is_stacked_on(top, base)
 
     def stack_all(self) -> tuple[int, int]:
         """Build a tower from every cube in the workspace.
@@ -437,7 +511,7 @@ class SimArm:
         cubes = [
             o
             for o in self.objects
-            if o.shape == "cube" and o.position(self.data)[2] > -0.5
+            if o.shape == "cube" and self._in_workspace(o)
         ]
         if len(cubes) < 2:
             return 0, 0
@@ -449,7 +523,9 @@ class SimArm:
             attempted += 1
             if not self.grasp(cube):
                 break
-            if not self.place_at(self._slot_on(top_of_stack, cube.half_height)):
+            self.place_at(self._slot_on(top_of_stack, cube.half_height))
+            self.step(20)
+            if not self._is_stacked_on(cube, top_of_stack):
                 break
             stacked += 1
             top_of_stack = cube

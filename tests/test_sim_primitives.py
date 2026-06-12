@@ -84,6 +84,79 @@ def test_voice_sequence_pick_stack_and_place_at_corner():
         arm.close()
 
 
+def _teleport(arm, obj, pos):
+    jnt = arm.model.body_jntadr[obj.body_id]
+    adr = arm.model.jnt_qposadr[jnt]
+    arm.data.qpos[adr : adr + 3] = pos
+    arm.data.qpos[adr + 3 : adr + 7] = [1, 0, 0, 0]
+    vadr = arm.model.jnt_dofadr[jnt]
+    if vadr >= 0:
+        arm.data.qvel[vadr : vadr + 6] = 0.0
+    import mujoco as mj
+
+    mj.mj_forward(arm.model, arm.data)
+
+
+def test_is_stacked_on_physical_truth(arm):
+    red = arm.find_object(color="red")
+    purple = arm.find_object(color="purple")
+    rp = red.position(arm.data)
+    # Exactly on top -> stacked.
+    _teleport(arm, purple, rp + np.array([0, 0, red.half_height + purple.half_height]))
+    assert arm._is_stacked_on(purple, red)
+    # 5 cm away on the table -> NOT stacked (the old 6 cm place tolerance
+    # would have called this a success).
+    _teleport(arm, purple, rp + np.array([0.05, 0, 0]))
+    assert not arm._is_stacked_on(purple, red)
+    # On top but offset beyond the footprint -> NOT stacked.
+    _teleport(
+        arm,
+        purple,
+        rp + np.array([0.025, 0, red.half_height + purple.half_height]),
+    )
+    assert not arm._is_stacked_on(purple, red)
+
+
+def test_staged_scene_is_clean_and_separated():
+    from rex_tendon.control.sim_primitives import SimArm
+
+    arm = SimArm(viewer=False, arrange_objects=True, arrange_seed=2)
+    try:
+        staged = [o for o in arm.objects if arm._in_workspace(o)]
+        assert len(staged) == 4
+        assert all(o.shape == "cube" for o in staged)
+        import itertools
+
+        for a, b in itertools.combinations(staged, 2):
+            gap = np.linalg.norm(
+                a.position(arm.data)[:2] - b.position(arm.data)[:2]
+            )
+            assert gap > 0.06  # 90-degree spacing on the ring
+        for o in staged:
+            # Clear of the 5 cm base pedestal (no startup explosion).
+            assert np.linalg.norm(o.position(arm.data)[:2]) > 0.057
+        assert arm.scene_colors() == {o.color for o in staged}
+    finally:
+        arm.close()
+
+
+def test_stack_command_never_lies():
+    """Whatever the physical outcome, the reported result must match the
+    physical on-top truth check — the demo may fail, but it may not lie."""
+    from rex_tendon.control.sim_primitives import SimArm
+
+    arm = SimArm(viewer=False, arrange_objects=True, arrange_seed=3)
+    try:
+        colors = sorted(arm.scene_colors())
+        top_color, base_color = colors[0], colors[1]
+        ok = arm.stack(top_color, base_color)
+        top = arm.find_object(color=top_color)
+        base = arm.find_object(color=base_color)
+        assert ok == arm._is_stacked_on(top, base)
+    finally:
+        arm.close()
+
+
 def test_voice_intent_executor_pick(arm):
     from rex_tendon.control.sim_primitives import SimIntentExecutor
     from rex_tendon.control.voice_commands import handle_text
